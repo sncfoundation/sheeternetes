@@ -70,10 +70,10 @@ Sheeternetes. Distributable across many sheets that self-assemble into a cluster
 
 ## Developer platform
 
-### 💭 SheetHub — a GitLab-style forge on a spreadsheet · [#35](https://github.com/sncfoundation/sheeternetes/issues/35)
+### 🟢 SheetHub — a GitLab-style forge on a spreadsheet · [#35](https://github.com/sncfoundation/sheeternetes/issues/35)
 An all-in-one DevOps forge whose data plane is a Sheet: repos, issues, merge requests,
 releases, and CI in one workbook. The forge maps cleanly to tabs; real git transport is a
-read-only stretch goal. Meta-win: SheetHub hosts the manifests Sheeternetes deploys via
+read-only stretch goal. Implemented in [`sncfoundation/sheethub`](https://github.com/sncfoundation/sheethub). Meta-win: SheetHub hosts the manifests Sheeternetes deploys via
 Sheetlux CD — the whole stack self-hosts on spreadsheets.
 
 ## Clients &amp; language bindings (community)

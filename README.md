@@ -252,6 +252,7 @@ each a category leader in a category of exactly one:
 | **Sheeternetes** | Kubernetes | the orchestrator itself | ✅ works |
 | **Sheetlium** | Cilium | shared Docker network + deployment-name DNS aliases = **Services** with round-robin load balancing | ✅ works (single-host) |
 | **Sheetlux CD** | Flux / Argo CD | GitOps: `./sheetlux <dir>` continuously syncs a directory of manifests into the cluster | ✅ works |
+| **SheetHub** | GitLab / GitHub | DevOps forge on a spreadsheet (repos, issues, MRs with spec diffs, releases, manifests) | ✅ works ([`sheethub`](https://github.com/sncfoundation/sheethub)) |
 | **SheetVirt** | KubeVirt | run VMs as pods | 🔭 vision (VMs are the hard 95%) |
 
 ## Status — what works, what's missing, and the road to dethroning Kubernetes
