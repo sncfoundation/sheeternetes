@@ -11,6 +11,16 @@ Contributions reconcile.
 
 Status legend: 🟢 shipped · 🟡 in progress · ⚪ planned · 💭 idea
 
+## Recently shipped 🟢
+
+Delivered since this roadmap was written — some were "ideas" above, some are net-new:
+
+- **Cross-substrate federation** — Sheetwire networking, capacity `stretch`, and live `migrate` across an Excel cluster and a Google Sheets cluster (see Sheetmesh #6).
+- **Formula scheduler** — the scheduler (bin-packing, capacity, affinity, taints, cordon, sticky) reimplemented as a pure Google Sheets formula; matches the Python `schedule()` on all its unit tests.
+- **SICF — the Sheet Container Initiative** — an on-sheet OCI image format (layers as sha256-addressed base64 cells) with a `sheetbuild` round-trip tool, load-tested; plus a container registry merged into SheetHub.
+- **SheetsOperator** — a canonical operator for Google Sheets (control plane → controller → self-healing managed sheets).
+- **wasmlet** — a sheet-native WASM/WASI runtime (see SheetAssembly #24).
+
 ## Flagship
 
 ### ⚪ Cozystack managed application · [#7](https://github.com/sncfoundation/sheeternetes/issues/7)
@@ -30,8 +40,10 @@ A shields.io-style SVG badge (`CSFE · SFE000001`) for READMEs and LinkedIn.
 ### ⚪ skctl ↔ kubectl parity · [#10](https://github.com/sncfoundation/sheeternetes/issues/10)
 Grow `skctl` toward `get` / `describe` / `logs` / `apply -f` / `-o yaml`.
 
-### 💭 Sheetmesh · [#6](https://github.com/sncfoundation/sheeternetes/issues/6)
+### 🟡 Sheetmesh · [#6](https://github.com/sncfoundation/sheeternetes/issues/6)
 Federate several spreadsheets into one mesh — services discoverable across workbooks.
+
+_Shipped (MVP): cross-substrate federation in `sheeternetes-onprem` — **Sheetwire** (a spreadsheet as the network transport, validated two-host), `bridge stretch` (pool the peer's capacity), and cross-substrate `migrate`. Next: a rendezvous `Mesh` tab and multi-peer topology._
 
 ### 💭 HPA = conditional formatting · [#11](https://github.com/sncfoundation/sheeternetes/issues/11)
 Autoscaling driven by a cell formula; conditional formatting for over-quota.
@@ -56,15 +68,17 @@ Watch the Events tab; predict failures with total confidence and no accountabili
 
 ## WebAssembly
 
-### 💭 SheetAssembly — schedule WASI/WASM workloads · [#24](https://github.com/sncfoundation/sheeternetes/issues/24)
+### 🟡 SheetAssembly — schedule WASI/WASM workloads · [#24](https://github.com/sncfoundation/sheeternetes/issues/24)
 A "pod" can be a WASM module; kubelet runs it via wasmtime instead of `docker run`.
 
-### 💭 skctl-wasm — the CLI in the browser · [#25](https://github.com/sncfoundation/sheeternetes/issues/25)
+_Shipped (runtime): `wasmlet.py` pulls a WASM module out of a spreadsheet cell, verifies its sha256, and runs it via `wasmtime` — no Docker, no registry. Next: wire it into the kubelet as a first-class `wasm:` pod kind._
+
+### 🟢 skctl-wasm — the CLI in the browser · [#25](https://github.com/sncfoundation/sheeternetes/issues/25)
 Compile skctl to WebAssembly and run it client-side against the apiserver.
 
 ## Operating system
 
-### 💭 SheetOS — Talos for spreadsheets · [#26](https://github.com/sncfoundation/sheeternetes/issues/26)
+### 🟡 SheetOS — Talos for spreadsheets · [#26](https://github.com/sncfoundation/sheeternetes/issues/26)
 A minimal, API-only, declarative node OS whose single job is to bootstrap and run
 Sheeternetes. Distributable across many sheets that self-assemble into a cluster.
 
@@ -78,18 +92,18 @@ Sheetlux CD — the whole stack self-hosts on spreadsheets.
 
 ## Clients &amp; language bindings (community)
 
-### ⚪ PowerShell IaC · [#27](https://github.com/sncfoundation/sheeternetes/issues/27)
+### 🟢 PowerShell IaC · [#27](https://github.com/sncfoundation/sheeternetes/issues/27)
 Declarative cmdlets / DSC for the cluster. _Proposed by the community._
 
-### ⚪ Lisp client · [#29](https://github.com/sncfoundation/sheeternetes/issues/29)
+### 🟢 Lisp client · [#29](https://github.com/sncfoundation/sheeternetes/issues/29)
 Homoiconic orchestration from the REPL. _Proposed by the community._
 
-### ⚪ Brainfuck client · [#28](https://github.com/sncfoundation/sheeternetes/issues/28)
+### 🟢 Brainfuck client · [#28](https://github.com/sncfoundation/sheeternetes/issues/28)
 If it reconciles from here, it reconciles anywhere. _Proposed by the community._
 
 ## Cloud connectors
 
-### ⚪ Cloud connectors · [#15](https://github.com/sncfoundation/sheeternetes/issues/15)
+### 🟡 Cloud connectors · [#15](https://github.com/sncfoundation/sheeternetes/issues/15)
 Run containers on managed backends, not only local Docker. The Sheet stays the source of
 truth ("Sheet-Ops" across clouds).
 
@@ -101,14 +115,14 @@ truth ("Sheet-Ops" across clouds).
 
 ## Foundation &amp; structure
 
-### ⚪ Establish the SNCF org &amp; split into components · [#33](https://github.com/sncfoundation/sheeternetes/issues/33)
+### 🟢 Establish the SNCF org &amp; split into components · [#33](https://github.com/sncfoundation/sheeternetes/issues/33)
 Stand up the Sheet-Native Computing Foundation as a GitHub org and break the monorepo into
 per-project repos (with redirects from the old locations).
 
-### ⚪ Extract Sheetlium (Cilium analog) · [#31](https://github.com/sncfoundation/sheeternetes/issues/31)
+### 🟢 Extract Sheetlium (Cilium analog) · [#31](https://github.com/sncfoundation/sheeternetes/issues/31)
 Networking as its own component.
 
-### ⚪ Extract Sheetlux CD (Argo CD analog) · [#32](https://github.com/sncfoundation/sheeternetes/issues/32)
+### 🟢 Extract Sheetlux CD (Argo CD analog) · [#32](https://github.com/sncfoundation/sheeternetes/issues/32)
 GitOps delivery as its own component.
 
 ## How to influence the roadmap
