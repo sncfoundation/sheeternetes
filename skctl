@@ -19,6 +19,15 @@
 #   skctl restore --revision <id> | --at <time> [--tabs Deployments,...] [--dry-run]
 #   skctl tour                      # guided demo
 #
+# Script pods and Sheetstor volumes (docs/script-runtime.md):
+#   skctl get scripts|volumes|secrets
+#   skctl volume create <name> [--ro] | ls [<name>] | put <name> <path> <file> | get <name> <path> [<file>]
+#   skctl volume rm <name> <path> | delete <name>
+#   skctl secret set <name> KEY=VALUE... (KEY=- reads the value from stdin) | ls | rm <name>
+#   skctl run <deployment> [-- <fn> <args...>]
+#   skctl logs <pod|deployment> [--previous]
+#   skctl webhook <deployment> [--rotate]   # prints the webhook URL (it carries a key: keep it private)
+#
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # environment variables win over .skctl.env
@@ -30,13 +39,21 @@ WEBAPP_URL="${WEBAPP_URL:?set WEBAPP_URL (Apps Script /exec URL)}"
 TOKEN="${TOKEN:-CHANGE_ME_super_secret}"
 
 api_get()  { curl -fsSL -m 30 "$WEBAPP_URL?token=$TOKEN&kind=$1"; }
-api_post() { curl -fsSL -m 30 -X POST "$WEBAPP_URL" -H 'Content-Type: application/json' -d "$1"; }
+api_post() { curl -fsSL -m 30 "$WEBAPP_URL" -H 'Content-Type: application/json' -d "$1"; }
+# long-running calls; the JSON body comes on stdin (large files, secrets stay out of argv)
+api_post_stdin() { curl -fsSL -m 360 "$WEBAPP_URL" -H 'Content-Type: application/json' --data-binary @-; }
+or_fail() { jq 'if .error then error(.error) else . end'; }
 
 cmd="${1:-help}"; shift || true
 
 case "$cmd" in
   get)
     kind="${1:-pods}"
+    case "$kind" in
+      scripts) api_get scripts | jq -r '["NAME","POD","REPLICAS","SCHEDULE","WEBHOOK","RESTARTS","LAST_RUN","LAST_ERROR"], (.items[]|[.name,(.pod|if . == "" then "<none>" else . end),.replicas,(.schedule|tostring|if . == "" then "<none>" else .[0:40] end),.webhook,.restarts,(.last_run|if . == "" then "<never>" else . end),(.last_error|if . == "" then "<none>" else .[0:60] end)]) | @tsv' | column -t -s $'\t'; exit ;;
+      volumes) api_get volumes | jq -r '["NAME","MODE","GENERATION","FILES","SIZE","SHA256"], (.items[]|[.name,.mode,.generation,.files,.size,(.sha256|.[0:19])]) | @tsv' | column -t -s $'\t'; exit ;;
+      secrets) api_get secrets | jq -r '["NAME","KEYS"], (.items[]|[.name,(.keys|join(","))]) | @tsv' | column -t -s $'\t'; exit ;;
+    esac
     case "$kind" in
       pods)        api_get pods | jq -r '["NAME","DEPLOYMENT","NODE","PHASE","CONTAINER"], (.items[]|[.name,.deployment,.node,.phase,(.container_id|tostring|.[0:12])]) | @tsv' | column -t -s $'\t' ;;
       nodes)       api_get nodes | jq -r '["NAME","IP","CPU","CPU_USED","MEM","STATUS","LABELS","TAINTS","HEARTBEAT"], (.items[]|[.name,.ip,.cpu_total,.cpu_used,.mem_total,(.status + (if ((.schedulable|tostring|ascii_upcase) == "FALSE") then ",SchedulingDisabled" else "" end)),(.labels // "" | if . == "" then "<none>" else . end),(.taints // "" | if . == "" then "<none>" else . end),.last_heartbeat]) | @tsv' | column -t -s $'\t' ;;
@@ -101,6 +118,66 @@ case "$cmd" in
     ;;
   tour)
     exec "$here/lab/tour.sh"
+    ;;
+  volume)
+    sub="${1:-ls}"; shift || true
+    case "$sub" in
+      create)
+        mode=rw; [ "${2:-}" = "--ro" ] && mode=ro
+        api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?volume}" --arg m "$mode" '{token:$t, action:"volumeCreate", name:$n, mode:$m}')" | or_fail ;;
+      ls)
+        if [ -n "${1:-}" ]; then
+          curl -fsSL -m 30 "$WEBAPP_URL?token=$TOKEN&kind=files&name=$1" | or_fail | jq -r '["PATH","SIZE","GENERATION","SHA256"], (.items[]|[.path,.size,.generation,.sha256]) | @tsv' | column -t -s $'\t'
+        else exec "$0" get volumes; fi ;;
+      put)
+        name="${1:?volume}"; path="${2:?path}"; file="${3:?local file}"
+        sum="sha256:$(shasum -a 256 "$file" | cut -d' ' -f1)"
+        base64 < "$file" | tr -d '\n' | jq -Rs --arg t "$TOKEN" --arg n "$name" --arg p "$path" --arg s "$sum" \
+          '{token:$t, action:"volumePut", name:$n, path:$p, sha256:$s, data:.}' | api_post_stdin | or_fail ;;
+      get)
+        name="${1:?volume}"; path="${2:?path}"; out="${3:-/dev/stdout}"
+        jq -n --arg t "$TOKEN" --arg n "$name" --arg p "$path" '{token:$t, action:"volumeGet", name:$n, path:$p}' \
+          | api_post_stdin | or_fail | jq -r .data | base64 -d > "$out" ;;
+      rm)
+        api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?volume}" --arg p "${2:?path}" '{token:$t, action:"volumeRm", name:$n, path:$p}')" | or_fail ;;
+      delete)
+        api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?volume}" '{token:$t, action:"volumeDelete", name:$n}')" | or_fail ;;
+      *) echo "usage: skctl volume create|ls|put|get|rm|delete ..." >&2; exit 1 ;;
+    esac
+    ;;
+  secret)
+    sub="${1:-ls}"; shift || true
+    case "$sub" in
+      set)
+        name="${1:?secret name}"; shift
+        data='{}'
+        for kv in "$@"; do
+          k="${kv%%=*}"; v="${kv#*=}"
+          if [ "$v" = "-" ]; then v="$(cat)"; fi
+          data="$(jq -c --arg k "$k" --arg v "$v" '. + {($k): $v}' <<<"$data")"
+        done
+        jq -n --arg t "$TOKEN" --arg n "$name" --argjson d "$data" '{token:$t, action:"secretSet", name:$n, data:$d}' | api_post_stdin | or_fail ;;
+      ls) exec "$0" get secrets ;;
+      rm) api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?secret}" '{token:$t, action:"secretDelete", name:$n}')" | or_fail ;;
+      *) echo "usage: skctl secret set|ls|rm ..." >&2; exit 1 ;;
+    esac
+    ;;
+  run)
+    name="${1:?deployment}"; shift
+    [ "${1:-}" = "--" ] && shift
+    jq -n --arg t "$TOKEN" --arg n "$name" '{token:$t, action:"run", name:$n, args:$ARGS.positional}' --args "$@" \
+      | api_post_stdin | jq 'if .error then (.logs // [] | .[] | "log: " + . | stderr) | error(.error) else . end'
+    ;;
+  logs)
+    target="${1:?pod or deployment}"; field="tail"
+    [ "${2:-}" = "--previous" ] && field=previous
+    pod="$(api_get pods | jq -r --arg t "$target" '[.items[] | select(.name == $t or (.deployment == $t and .phase == "Running"))][0].name // $t')"
+    curl -fsSL -m 30 "$WEBAPP_URL?token=$TOKEN&kind=logs&name=$pod" | jq -r --arg f "$field" '.items[0][$f] // ""'
+    ;;
+  webhook)
+    name="${1:?deployment}"; rot=false; [ "${2:-}" = "--rotate" ] && rot=true
+    q="$(api_post "$(jq -n --arg t "$TOKEN" --arg n "$name" --argjson r "$rot" '{token:$t, action:"webhook", name:$n, rotate:$r}')" | or_fail | jq -r .query)"
+    echo "$WEBAPP_URL$q"
     ;;
   *)
     grep '^#' "$0" | sed 's/^# \{0,1\}//'

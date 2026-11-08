@@ -68,10 +68,21 @@ _Shipped: `skctl restore --revision | --at`, and revision history as the API fac
 
 ## Storage
 
-### 💭 Sheetstor — distributed block storage (LINSTOR analog) · [#30](https://github.com/sncfoundation/sheeternetes/issues/30)
+### 🟡 Sheetstor — distributed block storage (LINSTOR analog) · [#30](https://github.com/sncfoundation/sheeternetes/issues/30)
 Replicated PersistentVolumes tracked in a `Volumes` tab; a CSI-ish kubelet shim provisions
 host paths and the loop keeps replicas satisfied (DRBD/LINSTOR-style resync). Closes the
 biggest gap in the stack — storage.
+
+_Shipped: the `Volumes` tab and volumes whose blocks are cells (copy-on-write generations,
+sha256, `ro` volumes), used by script pods. Next: mount them into Docker pods through
+`kubelet.sh`, and replicas across spreadsheets._
+
+## Serverless
+
+### 🟢 Script pods — the Sheet runs the pod
+`runtime: script` Deployments run inside the cluster's own Apps Script project: cron slots
+exactly once, webhooks, one-off runs, transactional state on Sheetstor, secrets in Script
+Properties. No Docker host, no kubelet, no computer. See [docs/script-runtime.md](docs/script-runtime.md).
 
 ## AI
 

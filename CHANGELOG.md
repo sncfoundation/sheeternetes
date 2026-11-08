@@ -4,6 +4,42 @@ All notable changes to Sheeternetes are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning is based on
 however many zeroes we feel like, because the spreadsheet is eternal.
 
+## [Unreleased]
+
+### Added
+- **Script pods** (`Runtime.gs`, `docs/script-runtime.md`): a Deployment with
+  `runtime: script` runs as a synchronous JavaScript module inside the cluster's own
+  Apps Script project. `setup()` registers the project as the node `apps-script`
+  (label and `NoSchedule` taint `runtime=script`), so the reconcile loop and the formula
+  scheduler place these pods unchanged. Cron `schedule` slots fire exactly once (slots
+  commit with the pod's state); webhooks at `?pod=<deployment>&key=…` answer HTTP 200
+  through `HtmlService`, or a redirect when the sender should redeliver, and keep
+  repeatedly failing bodies in a dead-letter table; `skctl run` invokes a function with
+  the schedule paused. Every invocation holds the script lock and is a transaction on
+  the pod's state; crashes count restarts and back off exponentially. Pods get
+  `env.vars`, `env.secrets`, `env.volumes`, `env.state`, `env.once`, `env.table`
+  (append-only tabs), `env.event` and `env.sleepUntil`. A `runtimeTick` trigger
+  replaces the plain reconcile timer, reconciles only when something is not converged,
+  and records trigger time per day in the `Runtime` tab.
+- **Sheetstor on cells** (`Sheetstor.gs`, #30): a `Volumes` registry tab and a hidden
+  tab per volume with files as base64 chunks under the 50,000-character cell limit,
+  sha256-verified, written copy-on-write with an atomic generation flip; `rw`/`ro`
+  volumes; `skctl volume create|ls|put|get|rm|delete`.
+- **Secrets** (#46) in Script Properties, never in cells: `skctl secret set|ls|rm`,
+  masked in logs, Events and API answers.
+- `skctl get scripts|volumes|secrets`, `skctl run`, `skctl logs [--previous]`,
+  `skctl webhook`; `lab/script-pods/hello.*`.
+- `hack/test-sheetstor.js`, `hack/test-runtime.js`; the test harness loads every `.gs`
+  file and fakes PropertiesService, CacheService, HtmlService, a contended lock and
+  triggers.
+
+### Changed
+- `appsscript.json` declares its OAuth scopes (Sheets, Drive, external requests,
+  triggers): code inside a string declares none, so they can no longer be inferred.
+  Existing clusters re-run `setup()` once to grant them.
+- `skctl` no longer forces `POST` on the redirect Apps Script answers with, which the
+  real web app refused with HTTP 405.
+
 ## [v0.0.0.0.0.4] — "Version History" — 2026-11-08
 
 The spreadsheet stopped imitating a cluster and started joining them: it schedules
