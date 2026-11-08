@@ -80,3 +80,21 @@ jobs:
         with:
           cluster_name: sheeternetes-e2e
       - run: hack/e2e-virtual-kubelet.sh
+
+  e2e-kube-facade:
+    name: E2E — kubectl against a spreadsheet
+    runs-on: ubuntu-latest
+    needs: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/setup-kubectl@v4
+      - name: fake kubelet
+        run: hack/e2e-kube-facade.sh
+      - name: real kubelet.sh + Docker
+        run: KUBELET=docker APORT=8791 FPORT=6451 hack/e2e-kube-facade.sh

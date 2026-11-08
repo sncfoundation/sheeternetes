@@ -13,6 +13,7 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/sncfoundation/sheeternetes/internal/kube"
 	"github.com/sncfoundation/sheeternetes/internal/sheetapi"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
@@ -72,45 +73,15 @@ func ToDeployment(pod *corev1.Pod) (sheetapi.Deployment, error) {
 			pod.Namespace, pod.Name, len(pod.Spec.Containers))
 	}
 	c := pod.Spec.Containers[0]
-	cpu, mem := int64(defaultCPU), int64(defaultMem)
-	if q, ok := request(c, corev1.ResourceCPU); ok {
-		cpu = q.MilliValue()
-	}
-	if q, ok := request(c, corev1.ResourceMemory); ok {
-		mem = (q.Value() + (1<<20 - 1)) >> 20 // round up to MiB
-	}
+	cpu, mem := kube.RequestsOf(c, defaultCPU, defaultMem)
 	return sheetapi.Deployment{
 		Name:     DeploymentName(pod.Namespace, pod.Name),
 		Image:    c.Image,
 		Replicas: 1,
 		CPUReq:   cpu,
 		MemReq:   mem,
-		Command:  shellJoin(append(append([]string{}, c.Command...), c.Args...)),
+		Command:  kube.ShellJoin(append(append([]string{}, c.Command...), c.Args...)),
 	}, nil
-}
-
-func request(c corev1.Container, r corev1.ResourceName) (resource.Quantity, bool) {
-	if q, ok := c.Resources.Requests[r]; ok {
-		return q, true
-	}
-	q, ok := c.Resources.Limits[r]
-	return q, ok
-}
-
-// shellJoin quotes argv for the kubelet's `sh -c`.
-func shellJoin(argv []string) string {
-	out := make([]string, 0, len(argv))
-	for _, a := range argv {
-		if a != "" && strings.IndexFunc(a, func(r rune) bool {
-			return !(r == '-' || r == '_' || r == '.' || r == '/' || r == '=' || r == ':' || r == ',' ||
-				r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
-		}) < 0 {
-			out = append(out, a)
-			continue
-		}
-		out = append(out, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
-	}
-	return strings.Join(out, " ")
 }
 
 func (p *Provider) rows(ctx context.Context) ([]sheetapi.Pod, error) {
@@ -240,61 +211,14 @@ func (p *Provider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	return out, nil
 }
 
-// status is the pure Sheet-row -> PodStatus mapping.
+// status is the pure Sheet-row -> PodStatus mapping (shared with the API facade).
 func (p *Provider) status(pod *corev1.Pod, row *sheetapi.Pod) corev1.PodStatus {
 	cname, image := "", ""
 	if len(pod.Spec.Containers) > 0 {
 		cname, image = pod.Spec.Containers[0].Name, pod.Spec.Containers[0].Image
 	}
-	created := pod.CreationTimestamp
-	st := corev1.PodStatus{Phase: corev1.PodPending, StartTime: &created}
-	cs := corev1.ContainerStatus{Name: cname, Image: image}
-	reason, msg := "ContainerCreating", "waiting for the spreadsheet to schedule the pod"
-	if row != nil {
-		st.HostIP, st.PodIP = row.NodeIP, row.NodeIP
-		if row.NodeIP != "" {
-			st.HostIPs = []corev1.HostIP{{IP: row.NodeIP}}
-			st.PodIPs = []corev1.PodIP{{IP: row.NodeIP}}
-		}
-		switch row.Phase {
-		case "Running":
-			started := metav1.Now()
-			if t, err := time.Parse(time.RFC3339, row.StartedAt); err == nil {
-				started = metav1.NewTime(t)
-			}
-			st.Phase = corev1.PodRunning
-			cs.Ready, cs.Started = true, boolPtr(true)
-			cs.ContainerID = "docker://" + row.ContainerID
-			cs.ImageID = image
-			cs.State.Running = &corev1.ContainerStateRunning{StartedAt: started}
-			st.Conditions = conditions(corev1.ConditionTrue, created)
-			st.ContainerStatuses = []corev1.ContainerStatus{cs}
-			return st
-		case "Scheduled":
-			msg = "scheduled on sheet node " + row.Node + ", waiting for its kubelet"
-		case "Pending":
-			if row.Message != "" {
-				reason, msg = "Unschedulable", row.Message
-			}
-		}
-	}
-	cs.Started = boolPtr(false)
-	cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: reason, Message: msg}
-	st.Conditions = conditions(corev1.ConditionFalse, created)
-	st.ContainerStatuses = []corev1.ContainerStatus{cs}
-	return st
+	return kube.PodStatus(row, cname, image, pod.CreationTimestamp)
 }
-
-func conditions(ready corev1.ConditionStatus, t metav1.Time) []corev1.PodCondition {
-	return []corev1.PodCondition{
-		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: t},
-		{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: t},
-		{Type: corev1.ContainersReady, Status: ready, LastTransitionTime: t},
-		{Type: corev1.PodReady, Status: ready, LastTransitionTime: t},
-	}
-}
-
-func boolPtr(b bool) *bool { return &b }
 
 // GetContainerLogs returns the tail the kubelet shipped into the Logs tab.
 func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {

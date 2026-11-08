@@ -1,11 +1,8 @@
 package provider
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"io"
-	"net/http"
 	"testing"
 	"time"
 
@@ -49,25 +46,8 @@ func TestToDeployment(t *testing.T) {
 	}
 }
 
-// heartbeat plays kubelet.sh: report the given pods as running (with log tails).
 func heartbeat(t *testing.T, url, node string, running map[string]string) []map[string]any {
-	t.Helper()
-	pods := []map[string]any{}
-	for name, logs := range running {
-		pods = append(pods, map[string]any{"name": name, "phase": "Running", "container_id": "cid-" + name, "logs": logs})
-	}
-	b, _ := json.Marshal(map[string]any{"token": testsheet.Token, "node": node, "ip": "10.1.2.3",
-		"cpu_total": 4000, "mem_total": 4096, "pods": pods})
-	res, err := http.Post(url, "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	var out struct{ Pods []map[string]any }
-	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	return out.Pods
+	return testsheet.Heartbeat(t, url, node, running)
 }
 
 // End to end against hack/local-apiserver.js: the real Code.gs control plane.

@@ -497,6 +497,16 @@ function controlOp(body) {
     } else if (body.action === 'delete') {
       deps = deps.filter(d => d.name !== body.name);
       event('Deployment', body.name, 'deleted');
+    } else if (body.action === 'deletePod') {
+      // like `kubectl delete pod`: the pod terminates, its Deployment replaces it
+      const pods = readTab('Pods');
+      const p = pods.find(x => x.name === body.name && x.phase !== 'Deleted');
+      if (!p) return json({ error: 'no such pod ' + body.name });
+      if (p.phase !== 'Terminating') {
+        p.phase = 'Terminating';
+        writeTab('Pods', pods);
+        event('Pod', p.name, 'deleted by API -> Terminating');
+      }
     } else if (body.action === 'cordon' || body.action === 'uncordon') {
       const nodes = readTab('Nodes');
       const n = nodes.find(x => x.name === body.name);

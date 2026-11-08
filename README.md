@@ -254,6 +254,49 @@ kind cluster runs the Virtual Kubelet against `hack/local-apiserver.js` with a r
 `kubelet.sh` and Docker, a Pod reaches Running, `kubectl logs` shows its output,
 and `kubectl delete` removes the container.
 
+## kubectl and k9s, pointed at a spreadsheet
+
+Muscle memory is the last lock-in. The **Kubernetes API facade** serves the
+Kubernetes API in front of a Sheet, so the real `kubectl` — and anything else that
+speaks the API — drives Sheeternetes directly:
+
+```bash
+go run ./kube-facade --sheet-url https://script.google.com/macros/s/XXXX/exec \
+  --sheet-token your-secret --token choose-one --write-kubeconfig sheet.kubeconfig
+export KUBECONFIG=sheet.kubeconfig
+kubectl get nodes
+kubectl create deployment web --image=traefik/whoami --replicas=3
+kubectl get pods -o wide -w
+kubectl scale deployment web --replicas=6
+kubectl describe pod web-…            # events come from the Events tab
+kubectl logs web-…                    # tails from the Logs tab
+kubectl cordon node-a                 # flips the `schedulable` cell
+kubectl delete deployment web
+```
+
+What is served: discovery (`/api`, `/apis`, `/version`, a minimal `/openapi/v2`),
+core/v1 **Pods** (get, list, watch, delete, `log`), **Nodes** (get, list, watch,
+patch → cordon), **Events**, **Namespaces**; apps/v1 **Deployments** (create, get,
+list, watch, patch/update, delete, and the `scale` subresource) and an empty
+**ReplicaSets** list so `kubectl describe deployment` is happy; server-side Tables
+for `kubectl get`; label and field selectors (`spec.nodeName`, `involvedObject.*`);
+JSON, merge and strategic-merge patches; protobuf request bodies (recent kubectl
+sends them). `SelfSubjectAccessReview` always says yes — the spreadsheet is shared
+with Anyone. Watches poll the Sheet (`--poll`, default 2s) and stream the
+differences; `sendInitialEvents` bookmarks are supported, so `kubectl delete`
+waits correctly.
+
+Namespaces: rows written by the Virtual Kubelet are `<namespace>.<name>`;
+everything else is in `default`. Without `--token` the facade speaks plain HTTP on
+`127.0.0.1`; with a token it serves HTTPS with a self-signed certificate (kubectl
+never sends tokens over HTTP) and the kubeconfig it writes skips verification.
+
+CI drives it with a real `kubectl` (`hack/e2e-kube-facade.sh`): discovery, `get`,
+`describe` (pod, deployment, node), `create deployment`, `scale`, `logs`, `get -w`,
+`cordon`/`uncordon`, `delete pod` (replaced by its Deployment) and
+`delete deployment` — once with a fake kubelet and once with `kubelet.sh` and real
+Docker containers. k9s uses the same endpoints but is not part of CI.
+
 ## The lab
 
 Pre-baked things to deploy and watch (open the Sheet side-by-side):

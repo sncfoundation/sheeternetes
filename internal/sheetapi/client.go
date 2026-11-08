@@ -302,3 +302,9 @@ func (c *Client) Cordon(ctx context.Context, node string, cordon bool) error {
 	}
 	return c.post(ctx, map[string]any{"action": action, "name": node}, nil)
 }
+
+// DeletePod marks one Pods row Terminating (kubectl delete pod); its Deployment
+// creates a replacement on the next reconcile.
+func (c *Client) DeletePod(ctx context.Context, name string) error {
+	return c.post(ctx, map[string]any{"action": "deletePod", "name": name}, nil)
+}

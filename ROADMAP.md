@@ -23,6 +23,7 @@ Delivered since this roadmap was written — some were "ideas" above, some are n
 - **SheetGate** — an Ingress / Gateway API analog: `Gateways` and `Routes` tabs drive a generated, validated, hot-reloaded nginx gateway, plus published container ports (a NodePort analog). In `sheeternetes-onprem` ([#56](https://github.com/sncfoundation/sheeternetes/issues/56)).
 - **Pluggable storage backends** — the on-prem apiserver runs on Excel, LibreOffice Calc, or plain CSVs as well as Google Sheets ([#60](https://github.com/sncfoundation/sheeternetes/issues/60)).
 - **Sheetelligence**, **SheetAIOps**, and **SheetFinOps** CLIs — plain-English intents to manifests, ranked incidents from the Events tab, and an itemized $0 bill.
+- **Kubernetes API facade** — real `kubectl` against a spreadsheet: get, describe, logs, scale, watch, cordon, delete.
 - **Sheeternetes Virtual Kubelet** — a spreadsheet joins any Kubernetes cluster (Cozystack tenants included) as a Node; pods selecting it run on the Sheet's kubelets, with status and `kubectl logs`.
 - **Sheeternetes v0.0.0.0.0.3 "Save As…"** — the product repo under the SNCF org, with SheetHub linked as the stack's forge.
 
@@ -42,8 +43,10 @@ A shields.io-style SVG badge (`CSFE · SFE000001`) for READMEs and LinkedIn.
 
 ## Runtime
 
-### ⚪ skctl ↔ kubectl parity · [#10](https://github.com/sncfoundation/sheeternetes/issues/10)
+### 🟡 skctl ↔ kubectl parity · [#10](https://github.com/sncfoundation/sheeternetes/issues/10)
 Grow `skctl` toward `get` / `describe` / `logs` / `apply -f` / `-o yaml`.
+
+_Shipped a shortcut: the Kubernetes API facade lets the real `kubectl` drive a Sheet (`get`, `describe`, `logs`, `scale`, `-o yaml`, `-w`, `delete`, `cordon`). Next: `kubectl apply -f` (needs a real OpenAPI document)._
 
 ### 🟡 Sheetmesh · [#6](https://github.com/sncfoundation/sheeternetes/issues/6)
 Federate several spreadsheets into one mesh — services discoverable across workbooks.
