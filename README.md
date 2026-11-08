@@ -107,7 +107,9 @@ their headers, a sample workload, and the reconcile timer).
 
 1. Create a **blank** Google Sheet.
 2. **Extensions → Apps Script**, paste [`Code.gs`](Code.gs).
-3. Set `TOKEN` at the top to something secret.
+3. Set `TOKEN` at the top to something secret. For disaster recovery, enable the
+   Drive advanced service (*Services → Drive API*, v3) — or show `appsscript.json`
+   in the editor settings and paste [`appsscript.json`](appsscript.json).
 4. Run `setup()` once (grant permissions when prompted — it's your own script,
    so on the "Google hasn't verified this app" screen choose *Advanced → Go to …*).
    This turns the blank sheet into the full structure: the four tabs with headers,
@@ -297,6 +299,44 @@ CI drives it with a real `kubectl` (`hack/e2e-kube-facade.sh`): discovery, `get`
 `delete deployment` — once with a fake kubelet and once with `kubelet.sh` and real
 Docker containers. k9s uses the same endpoints but is not part of CI.
 
+## Disaster recovery: RPO measured in Ctrl+Z
+
+Other orchestrators make you install Velero, configure object storage and rehearse
+restores. Sheeternetes has had point-in-time recovery since the day it was
+created, because Google Sheets keeps the version history of every edit.
+
+```bash
+./skctl revisions                                  # the Sheet's Drive revision history
+./skctl restore --at 2026-11-08T09:30:00Z --dry-run
+./skctl restore --at 2026-11-08T09:30:00Z          # latest revision at or before that time
+./skctl restore --revision 1234 --tabs Deployments
+```
+
+A restore asks Drive for the revision's `.xlsx` export link, lets Drive convert the
+export into a temporary spreadsheet, reads the tabs from it, trashes the temporary
+file, rewrites the current tabs and runs the reconcile loop. By default only the
+**Deployments** tab — the desired state — is restored; Pods, Nodes, Events and Logs
+are observed state that the loop rebuilds, which is also what a Kubernetes backup
+restores. `--tabs` overrides that. Every restore is recorded in the Events tab.
+
+The same history drives `resourceVersion` in the Kubernetes API facade: it is
+`<latest revision id> × 1000 + <changes the facade saw since that revision>`
+(Google cuts a revision per batch of edits, not per edit), so watches resume
+against the Sheet's own versioning. `--resource-version=counter` switches back to
+a plain change counter; without the Drive service the facade falls back to it
+automatically.
+
+**How it is tested.** `hack/test-revisions.js` runs the real `Code.gs` against an
+in-memory emulation of the Drive advanced service (revision list and get, the
+export link, conversion into a temporary file, trashing it): break a cluster,
+restore by time and by id, dry-run, and the error paths. `hack/local-apiserver.js`
+records a revision after every write request, so `skctl restore` works locally and
+the facade's resourceVersion test runs on it in CI.
+
+**Verify it in your own Sheet.** Enable the Drive service, apply something, wait a
+minute, scale it to a silly number, then `./skctl revisions` and
+`./skctl restore --at <a time in between>`; compare with *File → Version history*.
+
 ## The lab
 
 Pre-baked things to deploy and watch (open the Sheet side-by-side):
@@ -379,6 +419,8 @@ recording.
 | `skctl scale <deployment> <n>` | change replicas |
 | `skctl delete <deployment>` | remove a deployment |
 | `skctl cordon\|uncordon <node>` | stop / resume placing new pods on a node |
+| `skctl revisions` | list the Sheet's version history |
+| `skctl restore --revision <id> \| --at <time> [--tabs …] [--dry-run]` | roll the desired state back |
 | `skctl tour` | guided demo |
 
 **apiserver** (Apps Script Web App, HTTP)
@@ -387,9 +429,11 @@ recording.
 - `POST {action:"heartbeat", node, ip, cpu_total, pods:[…]}` — kubelet sync
 - `POST {action:"apply|scale|delete", …}` — control ops
 - `POST {action:"cordon|uncordon", name}` — node scheduling
+- `GET ?token=&kind=revisions` — Drive version history
+- `POST {action:"restore", revision|at, tabs?, dryRun?}` — roll tabs back to a revision
 
 **Apps Script functions** (run from the editor): `setup()`, `ensureTabs()` (upgrade
-an older sheet's columns), `reconcile()`, `schedulerFormula()`,
+an older sheet's columns), `reconcile()`, `schedulerFormula()`, `listRevisions()`,
 `simulate()`, `simulateNodeFailure()`.
 
 **On the host, a kubelet issues plain Docker:** `docker ps`, `docker run -d`,

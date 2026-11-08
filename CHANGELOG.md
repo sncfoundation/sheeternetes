@@ -32,6 +32,15 @@ however many zeroes we feel like, because the spreadsheet is eternal.
   Sheet, with server-side Tables, selectors, patches, protobuf bodies and polling
   watches, so real `kubectl` can get, describe, create, scale, log, watch, cordon and
   delete. Tested in CI with a real `kubectl` and with client-go.
+- **Disaster recovery from Google Sheets version history** (#12): `skctl revisions`
+  and `skctl restore --revision <id> | --at <time> [--tabs …] [--dry-run]`. Code.gs
+  exports the revision through the Drive advanced service, converts it into a
+  temporary spreadsheet, rewrites the Deployments tab (or the tabs you name) and
+  reconciles. `appsscript.json` enables the service.
+- The Kubernetes API facade takes its `resourceVersion` from the revision history
+  (`revision id × 1000 + changes seen since`), with a change counter as fallback.
+- `hack/test-revisions.js` and a Drive emulation in `hack/sheet-mock.js`; the local
+  apiserver records a revision after every write.
 - `deletePod` control op: `kubectl delete pod` marks the row Terminating and the
   Deployment replaces it.
 - **Logs** tab: `kubelet.sh` ships the last `LOG_TAIL` lines of each pod on every

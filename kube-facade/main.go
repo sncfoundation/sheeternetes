@@ -60,13 +60,18 @@ func main() {
 		"with a token the API is served over HTTPS with a self-signed certificate, since kubectl never sends tokens over HTTP")
 	poll := flag.Duration("poll", 2*time.Second, "how often watches re-read the Sheet")
 	kubeconfig := flag.String("write-kubeconfig", "", "write a kubeconfig for this facade to this path")
+	rvSource := flag.String("resource-version", "revisions", "where resourceVersions come from: revisions (Google Sheets version history) or counter")
 	flag.Parse()
 	if *sheetURL == "" {
 		fmt.Fprintln(os.Stderr, "set --sheet-url or SHEET_URL")
 		os.Exit(2)
 	}
-	srv := facade.New(sheetapi.New(*sheetURL, *token))
+	sheet := sheetapi.New(*sheetURL, *token)
+	srv := facade.New(sheet)
 	srv.Token, srv.Poll = *clientToken, *poll
+	if *rvSource == "revisions" {
+		srv.Versioner = &facade.Revisions{Source: sheet, TTL: *poll}
+	}
 	scheme := "http"
 	hs := &http.Server{Addr: *listen, Handler: srv, ReadHeaderTimeout: 30 * time.Second}
 	if *clientToken != "" {

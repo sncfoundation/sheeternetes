@@ -44,8 +44,10 @@ const POD_SPEC = ['image', 'command', 'cpu_req', 'mem_req', 'node_selector', 'to
 // ---------- generic sheet <-> objects ----------
 function ss() { return SpreadsheetApp.getActiveSpreadsheet(); }
 
-function readTab(name) {
-  const sh = ss().getSheetByName(name);
+function readTab(name) { return readTabFrom(ss(), name); }
+
+function readTabFrom(spreadsheet, name) {
+  const sh = spreadsheet.getSheetByName(name);
   if (!sh) return [];                       // a tab added in a newer version; ensureTabs() creates it
   const rng = sh.getDataRange().getValues();
   const header = rng.shift();
@@ -365,6 +367,10 @@ function doGet(e) {
   const p = e.parameter || {};
   if (p.token !== TOKEN) return json({ error: 'unauthorized' });
   const kind = (p.kind || 'pods').toLowerCase();
+  if (kind === 'revisions') {
+    try { return json({ items: listRevisions() }); }
+    catch (err) { return json({ error: String(err.message || err) }); }
+  }
   const map = { pods: 'Pods', nodes: 'Nodes', deployments: 'Deployments', events: 'Events', logs: 'Logs' };
   const tab = map[kind];
   if (!tab) return json({ error: 'unknown kind ' + kind });
@@ -380,6 +386,7 @@ function doPost(e) {
   if (body.token !== TOKEN) return json({ error: 'unauthorized' });
 
   // kubectl-style control operations (from skctl / the lab)
+  if (body.action === 'restore') return restoreOp(body);
   if (body.action && body.action !== 'heartbeat') return controlOp(body);
 
   const lock = LockService.getScriptLock();
@@ -528,6 +535,105 @@ function controlOp(body) {
 function json(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---------- disaster recovery: Google Sheets version history ----------
+// Every edit of the spreadsheet lands in its Drive revision history, so the
+// cluster's desired state can be rolled back to any revision. Needs the Drive
+// advanced service (Apps Script editor -> Services -> Drive API, see
+// appsscript.json). RPO: one Ctrl+Z.
+
+// Desired state lives in these tabs; Pods/Nodes/Events/Logs are observed state
+// that the reconcile loop rebuilds, exactly like a Kubernetes restore of specs.
+const RESTORE_TABS_DEFAULT = ['Deployments'];
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+function requireDrive() {
+  if (typeof Drive === 'undefined' || !Drive.Revisions) {
+    throw new Error('enable the Drive advanced service (Services -> Drive API v3) to use revision history');
+  }
+}
+
+// [{id, modifiedTime}] oldest first
+function listRevisions() {
+  requireDrive();
+  const out = [];
+  let pageToken;
+  do {
+    const page = Drive.Revisions.list(ss().getId(), { fields: 'nextPageToken,revisions(id,modifiedTime)', pageSize: 1000, pageToken: pageToken });
+    (page.revisions || []).forEach(r => out.push({ id: String(r.id), modifiedTime: r.modifiedTime }));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+// The latest revision at or before `at` (ISO time or epoch ms).
+function revisionAt(revisions, at) {
+  const t = typeof at === 'number' ? at : Date.parse(String(at));
+  if (isNaN(t)) throw new Error('bad time ' + at);
+  const before = revisions.filter(r => Date.parse(r.modifiedTime) <= t);
+  return before.length ? before[before.length - 1] : null;
+}
+
+// Read the tabs of an old revision: export it as .xlsx, let Drive convert that
+// into a temporary spreadsheet, read it, and trash the temporary file.
+function revisionTabs(revisionId, tabs) {
+  requireDrive();
+  const fileId = ss().getId();
+  const rev = Drive.Revisions.get(fileId, revisionId, { fields: 'id,exportLinks' });
+  const link = rev.exportLinks && rev.exportLinks[XLSX];
+  if (!link) throw new Error('revision ' + revisionId + ' cannot be exported');
+  const res = UrlFetchApp.fetch(link, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) throw new Error('export of revision ' + revisionId + ' failed: HTTP ' + res.getResponseCode());
+  const tmp = Drive.Files.create({ name: 'sheeternetes-restore-' + revisionId, mimeType: 'application/vnd.google-apps.spreadsheet' },
+                                 res.getBlob().setContentType(XLSX));
+  try {
+    const old = SpreadsheetApp.openById(tmp.id);
+    const out = {};
+    tabs.forEach(t => { out[t] = old.getSheetByName(t) ? readTabFrom(old, t) : null; });
+    return out;
+  } finally {
+    Drive.Files.update({ trashed: true }, tmp.id);
+  }
+}
+
+// POST {action:"restore", revision:"<id>" | at:"<ISO time>", tabs?:[...], dryRun?:true}
+function restoreOp(body) {
+  let target, snapshot;
+  const tabs = (body.tabs && body.tabs.length) ? body.tabs : RESTORE_TABS_DEFAULT;
+  try {
+    const bad = tabs.filter(t => !TABS[t]);
+    if (bad.length) return json({ error: 'unknown tab(s) ' + bad.join(', ') });
+    const revisions = listRevisions();
+    if (body.revision !== undefined && body.revision !== '') {
+      target = revisions.find(r => r.id === String(body.revision));
+    } else if (body.at) {
+      target = revisionAt(revisions, body.at);
+    } else {
+      return json({ error: 'restore needs revision or at' });
+    }
+    if (!target) return json({ error: 'no such revision' });
+    snapshot = revisionTabs(target.id, tabs);
+  } catch (err) {
+    return json({ error: String(err.message || err) });
+  }
+  const restored = {};
+  tabs.forEach(t => { restored[t] = snapshot[t] ? snapshot[t].length : 0; });
+  if (body.dryRun) return json({ ok: true, dryRun: true, revision: target, restored: restored, state: snapshot });
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    tabs.forEach(t => {
+      if (!snapshot[t]) return;  // the tab did not exist back then: leave it alone
+      writeTab(t, snapshot[t]);
+    });
+    event('System', 'restore', 'restored ' + tabs.join(', ') + ' from revision ' + target.id + ' (' + target.modifiedTime + ')');
+  } finally {
+    lock.releaseLock();
+  }
+  reconcile();
+  return json({ ok: true, revision: target, restored: restored });
 }
 
 // ---------- one-time setup ----------
