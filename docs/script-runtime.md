@@ -17,7 +17,7 @@ Apps Script project as an ordinary node:
 | `name` | `apps-script` |
 | `labels` | `runtime=script` |
 | `taints` | `runtime=script:NoSchedule` |
-| `last_heartbeat` | a lease, stamped five minutes ahead and renewed every few minutes |
+| `last_heartbeat` | a lease, stamped 15 minutes ahead and renewed every ten minutes |
 
 `skctl apply` gives every `runtime: script` Deployment the node selector and the
 toleration `runtime=script`, so the formula scheduler places its pod on
@@ -30,14 +30,18 @@ the plain reconcile timer and runs about once a minute:
 1. renews the node lease;
 2. runs `reconcile()` when something is not converged (a pod that is Pending or
    Scheduled, a replica count that differs, a stale node, a non-empty Autoscale tab)
-   and in any case every five minutes;
+   and in any case every ten minutes;
 3. moves pods on `apps-script` from Scheduled to Running and from Terminating to
    Deleted;
 4. fires the schedule slots that are due, unless the pod asked to sleep.
 
 A consumer Google account gets 90 minutes of trigger time a day, about 3.7 seconds
-per minute. An idle tick reads Nodes, Deployments and Pods once and Script
-Properties once, and touches no volume. Every tick adds its duration to a per-day
+per minute. After each full pass the tick notes when it next has work — the lease
+renewal, the reconcile backstop, the earliest pod that is awake — and until then a
+tick reads Script Properties once and returns. Any API call and `env.sleepUntil`
+clear that note. A full pass reads Nodes, Deployments and Pods once and touches no
+volume unless a slot is due. Edits made by hand in the Sheet are therefore picked up
+within ten minutes, or at the next API call. Every tick adds its duration to a per-day
 counter, and the `Runtime` tab shows ticks, trigger milliseconds, the slowest tick
 and the share of the budget used (Apps Script also counts each execution's
 start-up, which a script cannot measure, so keep a margin). `skctl get budget` prints it.
