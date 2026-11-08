@@ -20,6 +20,16 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 - `hack/test-formula-scheduler.js`: the formula (via a line-by-line port) and the
   script scheduler match the on-prem `schedule()` on its reference cases, each other on
   2,000 random clusters, and two scenarios computed by a real Google Sheet.
+- **Sheeternetes Virtual Kubelet** (`virtual-kubelet/`): a Go provider built on the
+  `virtual-kubelet` node libraries that registers a spreadsheet as the Node `sheet` in
+  any Kubernetes cluster (Cozystack tenant clusters included). Pods that select it
+  become one-replica Deployments rows; status, IP and `kubectl logs` are read back.
+  Ships with a Dockerfile, a manifest (`deploy/sheeternetes-vk.yaml`) and an example
+  pod; CI runs it end to end on kind against the local apiserver and a real
+  `kubelet.sh`.
+- **Logs** tab: `kubelet.sh` ships the last `LOG_TAIL` lines of each pod on every
+  heartbeat (capped at 20,000 characters per pod); `GET ?kind=logs&name=<pod>`.
+- `internal/sheetapi`: a Go client for the Sheet apiserver.
 - `hack/sheet-mock.js`: one Apps Script mock shared by every harness, with formula
   cells and recalculation.
 - **CI** (`.github/workflows/ci.yml`): runs every `hack/test*.js` control-plane test,

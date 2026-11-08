@@ -23,6 +23,7 @@ CPU_TOTAL="${CPU_TOTAL:-$(( $(nproc 2>/dev/null || echo 2) * 1000 ))}"   # milli
 MEM_TOTAL="${MEM_TOTAL:-2048}"                                            # MiB
 INTERVAL="${INTERVAL:-10}"                                                # seconds
 NODE_LABELS="${NODE_LABELS:-}"      # e.g. disk=ssd,zone=eu   (matched by node_selector)
+LOG_TAIL="${LOG_TAIL:-20}"          # log lines per pod shipped on each heartbeat
 NODE_TAINTS="${NODE_TAINTS:-}"      # e.g. gpu=true:NoSchedule (needs a toleration)
 
 echo "[kubelet] node=$NODE_NAME ip=$NODE_IP cpu=${CPU_TOTAL}m mem=${MEM_TOTAL}Mi -> $WEBAPP_URL"
@@ -45,6 +46,17 @@ while true; do
                 | map({name: .[0], phase: "Running", container_id: .[1]})'
   )"
   [ -z "$running_json" ] && running_json='[]'
+  # ship the last LOG_TAIL lines of every pod (read back by `kubectl logs` via the
+  # Virtual Kubelet provider / API facade); LOG_TAIL=0 disables it
+  if [ "$LOG_TAIL" -gt 0 ]; then
+    with_logs='[]'
+    while read -r p <&4; do
+      cid="$(echo "$p" | jq -r '.container_id')"
+      tail_txt="$(docker logs --tail "$LOG_TAIL" "$cid" 2>&1 | tail -c 4000 || true)"
+      with_logs="$(echo "$with_logs" | jq -c --argjson p "$p" --arg l "$tail_txt" '. + [$p + {logs: $l}]')"
+    done 4< <(echo "$running_json" | jq -c '.[]')
+    running_json="$with_logs"
+  fi
 
   # 2) heartbeat + fetch desired state
   resp="$(curl -fsSL -m 30 -X POST "$WEBAPP_URL" \
