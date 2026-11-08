@@ -3,6 +3,7 @@ package facade
 import (
 	"context"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -119,5 +120,62 @@ func TestClientGoAgainstFacade(t *testing.T) {
 	}
 	if _, err := cs.AppsV1().Deployments("default").Get(ctx, "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("want NotFound, got %v", err)
+	}
+}
+
+func TestResourceVersionFollowsRevisionHistory(t *testing.T) {
+	url := testsheet.Start(t)
+	sheet := sheetapi.New(url, testsheet.Token)
+	srv := New(sheet)
+	srv.Versioner = &Revisions{Source: sheet, TTL: 0}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	cs := kubernetes.NewForConfigOrDie(&rest.Config{Host: ts.URL})
+	ctx := context.Background()
+
+	revs, err := sheet.Revisions(ctx)
+	if err != nil || len(revs) == 0 {
+		t.Fatalf("revisions: %v %v", revs, err)
+	}
+	l1, err := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := revs[len(revs)-1].ID + "000"
+	if l1.ResourceVersion != want {
+		t.Fatalf("resourceVersion %s, want %s (latest revision x 1000)", l1.ResourceVersion, want)
+	}
+	testsheet.Heartbeat(t, url, "node-a", nil) // a write -> a new revision
+	revs2, _ := sheet.Revisions(ctx)
+	l2, _ := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	if len(revs2) <= len(revs) || l2.ResourceVersion != revs2[len(revs2)-1].ID+"000" {
+		t.Fatalf("after a write: rv %s, revisions %+v", l2.ResourceVersion, revs2)
+	}
+	a, _ := strconv.Atoi(l1.ResourceVersion)
+	b, _ := strconv.Atoi(l2.ResourceVersion)
+	if b <= a {
+		t.Fatalf("resourceVersion must grow: %d -> %d", a, b)
+	}
+}
+
+type fakeRevs struct{ id string }
+
+func (f *fakeRevs) Revisions(context.Context) ([]sheetapi.Revision, error) {
+	return []sheetapi.Revision{{ID: f.id}}, nil
+}
+
+func TestRevisionsCountsEditsInsideOneRevision(t *testing.T) {
+	src := &fakeRevs{id: "41"}
+	r := &Revisions{Source: src, TTL: 0}
+	ctx := context.Background()
+	steps := []struct{ rev, hash, want string }{
+		{"41", "a", "41000"}, {"41", "a", "41000"}, {"41", "b", "41001"}, {"42", "c", "42000"}, {"42", "d", "42001"},
+	}
+	for _, s := range steps {
+		src.id = s.rev
+		got, _ := r.Version(ctx, s.hash)
+		if got != s.want {
+			t.Fatalf("rev %s hash %s: got %s want %s", s.rev, s.hash, got, s.want)
+		}
 	}
 }

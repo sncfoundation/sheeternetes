@@ -76,7 +76,58 @@ function loadControlPlane(opts) {
   }
   sheetApi.cf = {};
 
+  // ---- Drive revision history (Google keeps one per batch of edits; here one per
+  // saveRevision() call, which local-apiserver.js makes after every write request)
+  const revisions = [];   // [{id, modifiedTime, grids}]
+  const tempFiles = {};   // converted exports, id -> grids
+  const trashed = [];
+  let clock = opts.clock || (() => new Date());
+  const snapshotGrids = () => {
+    evaluate('Pods');
+    const g = {};
+    Object.keys(store).forEach(k => { g[k] = store[k].map(r => r.slice()); });
+    return g;
+  };
+  function saveRevision() {
+    const grids = snapshotGrids();
+    const last = revisions[revisions.length - 1];
+    if (last && JSON.stringify(last.grids) === JSON.stringify(grids)) return last.id;
+    const id = String(revisions.length + 1);
+    revisions.push({ id, modifiedTime: clock().toISOString(), grids });
+    return id;
+  }
+  function readOnlySheet(grid) {
+    return { getDataRange: () => ({ getValues: () => grid.map(r => r.slice()) }), getName: () => '' };
+  }
+  const Drive = {
+    Revisions: {
+      list: () => ({ revisions: revisions.map(r => ({ id: r.id, modifiedTime: r.modifiedTime })) }),
+      get: (fileId, id) => {
+        if (!revisions.some(r => r.id === String(id))) throw new Error('Revision not found: ' + id);
+        return { id: String(id), exportLinks: {
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'mock://export/' + id } };
+      },
+    },
+    Files: {
+      create: (resource, blob) => { const id = 'tmp-' + (Object.keys(tempFiles).length + trashed.length + 1); tempFiles[id] = blob._grids; return { id }; },
+      update: (resource, id) => { if (resource.trashed) { trashed.push(id); delete tempFiles[id]; } return { id }; },
+    },
+  };
+  const UrlFetchApp = {
+    fetch: (url) => {
+      const m = /^mock:\/\/export\/(.+)$/.exec(url);
+      const rev = m && revisions.find(r => r.id === m[1]);
+      return { getResponseCode: () => (rev ? 200 : 404),
+               getBlob: () => ({ _grids: rev.grids, setContentType() { return this; } }) };
+    },
+  };
+
   const SpreadsheetApp = {
+    openById: (id) => {
+      const grids = tempFiles[id];
+      if (!grids) throw new Error('no file ' + id);
+      return { getSheetByName: (n) => (grids[n] ? readOnlySheet(grids[n]) : null) };
+    },
     getActiveSpreadsheet: () => ({
       getId: () => 'local',
       getSheetByName: (n) => (store[n] ? sheetApi(n) : null),
@@ -101,9 +152,10 @@ function loadControlPlane(opts) {
   const LockService = { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) };
   const ContentService = { MimeType: { JSON: 'json' },
     createTextOutput: (t) => ({ _t: t, setMimeType() { return this; } }) };
-  const ScriptApp = { getProjectTriggers: () => [],
+  const ScriptApp = { getProjectTriggers: () => [], getOAuthToken: () => 'mock-token',
     newTrigger: () => ({ timeBased: () => ({ everyMinutes: () => ({ create() {} }) }) }) };
-  const globals = { SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp };
+  const globals = { SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp, UrlFetchApp };
+  if (!opts.noDrive) globals.Drive = Drive;   // the advanced service is opt-in in Apps Script
   Object.assign(globals, opts.globals || {});
 
   const exportsList = ['doGet', 'doPost', 'setup', 'reconcile', 'controlOp', 'readTab', 'writeTab',
@@ -115,6 +167,10 @@ function loadControlPlane(opts) {
   api._store = store;
   api._formulas = formulas;
   api._cf = sheetApi.cf;
+  api._saveRevision = saveRevision;
+  api._revisions = revisions;
+  api._trashed = trashed;
+  api._setClock = (f) => { clock = f; };
   return api;
 }
 

@@ -16,6 +16,7 @@ const { loadControlPlane } = require('./sheet-mock');
 const api = loadControlPlane({ scheduler: process.env.SCHEDULER });
 if (process.env.NO_SAMPLES) api.ensureTabs();
 else api.setup();  // seed tabs + sample deployments (nginx x3, redis x1)
+api._saveRevision();
 
 const PORT = process.env.PORT || 8787;
 http.createServer((req, res) => {
@@ -26,7 +27,8 @@ http.createServer((req, res) => {
     send(api.doGet(e)._t);
   } else {
     let b = ''; req.on('data', c => b += c);
-    req.on('end', () => { try { send(api.doPost({ postData: { contents: b } })._t); }
+    // Google Sheets records every edit in the file's version history; emulate it
+    req.on('end', () => { try { const out = api.doPost({ postData: { contents: b } })._t; api._saveRevision(); send(out); }
       catch (err) { res.writeHead(500); res.end(JSON.stringify({ error: String(err) })); } });
   }
 }).listen(PORT, () => console.log(`[local-apiserver] Code.gs control plane on http://localhost:${PORT}/exec`));

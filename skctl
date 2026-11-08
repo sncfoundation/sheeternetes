@@ -13,6 +13,8 @@
 #   skctl scale <deployment> <replicas>
 #   skctl delete <deployment>
 #   skctl cordon|uncordon <node>
+#   skctl revisions                 # the Sheet's version history
+#   skctl restore --revision <id> | --at <time> [--tabs Deployments,...] [--dry-run]
 #   skctl tour                      # guided demo
 #
 set -euo pipefail
@@ -54,6 +56,27 @@ case "$cmd" in
   cordon|uncordon)
     name="${1:?node}"
     api_post "$(jq -n --arg t "$TOKEN" --arg a "$cmd" --arg n "$name" '{token:$t, action:$a, name:$n}')" | jq .
+    ;;
+  revisions)
+    api_get revisions | jq -r 'if .error then error(.error) else . end | ["REVISION","MODIFIED"], (.items[] | [.id, .modifiedTime]) | @tsv' | column -t -s $'\t'
+    ;;
+  restore)
+    rev=""; at=""; tabs=""; dry=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --revision) rev="${2:?}"; shift 2 ;;
+        --at) at="${2:?}"; shift 2 ;;
+        --tabs) tabs="${2:?}"; shift 2 ;;
+        --dry-run) dry=true; shift ;;
+        *) echo "usage: skctl restore --revision <id> | --at <time> [--tabs Deployments,...] [--dry-run]" >&2; exit 1 ;;
+      esac
+    done
+    [ -n "$rev$at" ] || { echo "restore needs --revision or --at" >&2; exit 1; }
+    api_post "$(jq -n --arg t "$TOKEN" --arg r "$rev" --arg a "$at" --arg tabs "$tabs" --argjson d "$dry" \
+      '{token:$t, action:"restore", dryRun:$d}
+       + (if $r != "" then {revision:$r} else {at:$a} end)
+       + (if $tabs != "" then {tabs:($tabs | split(","))} else {} end)')" \
+      | jq 'if .error then error(.error) else del(.state) end'
     ;;
   tour)
     exec "$here/lab/tour.sh"

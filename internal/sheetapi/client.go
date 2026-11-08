@@ -308,3 +308,49 @@ func (c *Client) Cordon(ctx context.Context, node string, cordon bool) error {
 func (c *Client) DeletePod(ctx context.Context, name string) error {
 	return c.post(ctx, map[string]any{"action": "deletePod", "name": name}, nil)
 }
+
+// Revision is one entry of the spreadsheet's Drive version history.
+type Revision struct {
+	ID           string
+	ModifiedTime string
+}
+
+// Revisions lists the version history (oldest first). Needs the Drive advanced
+// service in the Apps Script project; the local apiserver emulates it.
+func (c *Client) Revisions(ctx context.Context) ([]Revision, error) {
+	rows, err := c.get(ctx, "revisions", nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Revision, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Revision{ID: r.str("id"), ModifiedTime: r.str("modifiedTime")})
+	}
+	return out, nil
+}
+
+// RestoreResult is what a restore reports.
+type RestoreResult struct {
+	OK       bool           `json:"ok"`
+	DryRun   bool           `json:"dryRun"`
+	Revision map[string]any `json:"revision"`
+	Restored map[string]int `json:"restored"`
+}
+
+// Restore rolls tabs (default: Deployments) back to a revision id or a time.
+func (c *Client) Restore(ctx context.Context, revision, at string, tabs []string, dryRun bool) (*RestoreResult, error) {
+	body := map[string]any{"action": "restore", "dryRun": dryRun}
+	if revision != "" {
+		body["revision"] = revision
+	} else {
+		body["at"] = at
+	}
+	if len(tabs) > 0 {
+		body["tabs"] = tabs
+	}
+	var out RestoreResult
+	if err := c.post(ctx, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
