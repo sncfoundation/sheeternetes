@@ -23,6 +23,7 @@ Delivered since this roadmap was written — some were "ideas" above, some are n
 - **SheetGate** — an Ingress / Gateway API analog: `Gateways` and `Routes` tabs drive a generated, validated, hot-reloaded nginx gateway, plus published container ports (a NodePort analog). In `sheeternetes-onprem` ([#56](https://github.com/sncfoundation/sheeternetes/issues/56)).
 - **Pluggable storage backends** — the on-prem apiserver runs on Excel, LibreOffice Calc, or plain CSVs as well as Google Sheets ([#60](https://github.com/sncfoundation/sheeternetes/issues/60)).
 - **Sheetelligence**, **SheetAIOps**, and **SheetFinOps** CLIs — plain-English intents to manifests, ranked incidents from the Events tab, and an itemized $0 bill.
+- **HPA as a formula** — an Autoscale tab computes desired replicas from real `docker stats`; conditional formatting turns red over quota (#11).
 - **Disaster recovery from version history** — `skctl restore --at <time>` rolls the desired state back to any Sheet revision (#12).
 - **Kubernetes API facade** — real `kubectl` against a spreadsheet: get, describe, logs, scale, watch, cordon, delete.
 - **Sheeternetes Virtual Kubelet** — a spreadsheet joins any Kubernetes cluster (Cozystack tenants included) as a Node; pods selecting it run on the Sheet's kubelets, with status and `kubectl logs`.
@@ -54,8 +55,10 @@ Federate several spreadsheets into one mesh — services discoverable across wor
 
 _Shipped (MVP): cross-substrate federation in `sheeternetes-onprem` — **Sheetwire** (a spreadsheet as the network transport, validated two-host), `bridge stretch` (pool the peer's capacity), and cross-substrate `migrate`. Next: a rendezvous `Mesh` tab and multi-peer topology._
 
-### 💭 HPA = conditional formatting · [#11](https://github.com/sncfoundation/sheeternetes/issues/11)
+### 🟢 HPA = conditional formatting · [#11](https://github.com/sncfoundation/sheeternetes/issues/11)
 Autoscaling driven by a cell formula; conditional formatting for over-quota.
+
+_Shipped: the Autoscale tab — formulas compute desired replicas from `docker stats`, conditional formatting shows the state, the loop scales._
 
 ### 🟢 DR from Sheets revision history · [#12](https://github.com/sncfoundation/sheeternetes/issues/12)
 Restore a "cluster" from Google Sheets' version history. RPO measured in Ctrl+Z.

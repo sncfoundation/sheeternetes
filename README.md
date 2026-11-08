@@ -77,13 +77,14 @@ The control loop is **heartbeat-driven**: each kubelet reports the containers it
 runs, the apiserver runs a reconcile, and answers with the exact set of pods
 that node should be running. The node converges. That's the whole system.
 
-## The Sheet (five tabs)
+## The Sheet (six tabs)
 
 - **Deployments** — *you edit this.* `name, image, replicas, cpu_req (millicores), mem_req (MiB), command, node_selector, tolerations`
 - **Nodes** — written by kubelets: capacity, usage, `status`, `last_heartbeat`; you may edit `schedulable` (cordon), `labels`, `taints`
 - **Pods** — written by the control loop: `phase` (Pending → Scheduled → Running → Terminating → Deleted), which node, container id — plus the `chosen` column, where a formula schedules every pod
 - **Events** — an audit log of scheduling / scaling / eviction decisions
 - **Logs** — the last lines of every running pod, shipped by the kubelets (`kubectl logs`)
+- **Autoscale** — *you edit the first four columns*; formulas compute the desired replicas (the HPA)
 
 ## Prerequisites
 
@@ -299,6 +300,46 @@ CI drives it with a real `kubectl` (`hack/e2e-kube-facade.sh`): discovery, `get`
 `delete deployment` — once with a fake kubelet and once with `kubelet.sh` and real
 Docker containers. k9s uses the same endpoints but is not part of CI.
 
+## Autoscaling: a formula and conditional formatting
+
+The HorizontalPodAutoscaler is a tab. Each row of **Autoscale** names a deployment,
+a CPU target (percent of its request) and min/max replicas. Four columns next to it
+are formulas that Google Sheets keeps up to date from the Pods tab:
+
+| deployment | target_cpu | min_replicas | max_replicas | current_replicas | cpu_percent | desired_replicas | status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| web | 50 | 1 | 10 | 2 | 150 | 6 | ScalingUp |
+| api | 50 | 1 | 3 | 2 | 150 | 3 | LimitedByMax |
+| idle | 80 | 2 | 5 | 4 | 10 | 2 | ScalingDown |
+
+`desired_replicas` is the Kubernetes HPA rule — `ceil(current × usage / target)`,
+left alone within a 10% tolerance, clamped to `[min, max]` — written as one
+`MAP(LAMBDA)` in the header cell that spills down the column (keep columns E:H free
+of anything else, or the spill collides). Conditional formatting paints each row
+by `status`: red when the deployment wants more than `max_replicas` (out of quota),
+amber while scaling up, blue while scaling down, green when stable, grey without
+metrics. The reconcile loop does nothing clever: it copies `desired_replicas` into
+the Deployments tab, waits two minutes after a change before scaling down, and
+explains every change in Events.
+
+The metrics are real: `kubelet.sh` runs `docker stats` on each heartbeat and fills
+the new `cpu_usage` (millicores) and `mem_usage` (MiB) columns of the Pods tab
+(`REPORT_STATS=0` turns that off).
+
+```bash
+./skctl apply lab/autoscale.json                         # a busy loop asking for 200m
+./skctl autoscale burner --cpu-percent 50 --min 1 --max 3
+./skctl get hpa                                          # watch it go red at 3/3
+```
+
+**How it is tested.** The formulas were checked in a real Google Sheet: the table
+above is its output for the fixture in `hack/test-autoscale.js`, which also runs
+the real `Code.gs` loop (scale up to max, LimitedByMax, the scale-down
+stabilization window, the conditional-format rules `setup()` installs) with a port
+of the formulas in `hack/formula-port.js`. CI's `hack/e2e-autoscale.sh` runs it
+with real containers: `kubelet.sh` reports `docker stats` and the busy loop is
+scaled to max.
+
 ## Disaster recovery: RPO measured in Ctrl+Z
 
 Other orchestrators make you install Velero, configure object storage and rehearse
@@ -347,6 +388,7 @@ Pre-baked things to deploy and watch (open the Sheet side-by-side):
 | `lab/clock.json` | custom `command` flowing Sheet → kubelet → `docker run` |
 | `lab/microservices.json` | a small service "city" filling nodes by free CPU (bin-packing) |
 | `lab/overcommit.json` | asks for more CPU than exists — watch pods stay **Unschedulable** |
+| `lab/autoscale.json` | a CPU burner for `skctl autoscale` — watch the Autoscale row turn red |
 
 Guided demo (deploy → scale → self-heal → clean up):
 
@@ -419,6 +461,8 @@ recording.
 | `skctl scale <deployment> <n>` | change replicas |
 | `skctl delete <deployment>` | remove a deployment |
 | `skctl cordon\|uncordon <node>` | stop / resume placing new pods on a node |
+| `skctl autoscale <deployment> --cpu-percent N --min N --max N` | add/update a row of the Autoscale tab |
+| `skctl get hpa` | the Autoscale tab with its computed columns |
 | `skctl revisions` | list the Sheet's version history |
 | `skctl restore --revision <id> \| --at <time> [--tabs …] [--dry-run]` | roll the desired state back |
 | `skctl tour` | guided demo |
@@ -484,7 +528,6 @@ hard 95%.
 - **Hard limits & rebalancing** — placement now honors CPU *and* memory requests,
   but we don't enforce limits beyond Docker's `--cpus`/`--memory`, and a pod placed
   early never moves until its node dies.
-- **Horizontal autoscaling** on a simple metric.
 
 *The hard 95% (here be dragons):*
 

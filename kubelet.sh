@@ -24,6 +24,7 @@ MEM_TOTAL="${MEM_TOTAL:-2048}"                                            # MiB
 INTERVAL="${INTERVAL:-10}"                                                # seconds
 NODE_LABELS="${NODE_LABELS:-}"      # e.g. disk=ssd,zone=eu   (matched by node_selector)
 LOG_TAIL="${LOG_TAIL:-20}"          # log lines per pod shipped on each heartbeat
+REPORT_STATS="${REPORT_STATS:-1}"   # report docker stats (cpu/mem usage) for autoscaling
 NODE_TAINTS="${NODE_TAINTS:-}"      # e.g. gpu=true:NoSchedule (needs a toleration)
 
 echo "[kubelet] node=$NODE_NAME ip=$NODE_IP cpu=${CPU_TOTAL}m mem=${MEM_TOTAL}Mi -> $WEBAPP_URL"
@@ -46,6 +47,23 @@ while true; do
                 | map({name: .[0], phase: "Running", container_id: .[1]})'
   )"
   [ -z "$running_json" ] && running_json='[]'
+  # observed usage per pod from `docker stats` (millicores, MiB) for the Autoscale
+  # tab; docker's CPU% is per core, so 100% = 1000m. REPORT_STATS=0 disables it.
+  if [ "$REPORT_STATS" = 1 ] && [ "$running_json" != '[]' ]; then
+    # shellcheck disable=SC2046  # one argument per container id
+    stats_json="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' \
+        $(docker ps -q --filter "label=sheeternetes.node=$NODE_NAME") 2>/dev/null \
+      | jq -R -s '
+          def mib: capture("(?<n>[0-9.]+)\\s*(?<u>[A-Za-z]*)") as $m | ($m.n | tonumber) *
+            ({"B":0.00000095367,"kB":0.00095367,"KiB":0.0009765625,"MB":0.95367,"MiB":1,"GB":953.67,"GiB":1024}[$m.u] // 1);
+          split("\n") | map(select(length > 0) | split("|")
+            | {key: (.[0] | ltrimstr("sk_")),
+               value: {cpu_usage: (.[1] | rtrimstr("%") | tonumber * 10 | round),
+                       mem_usage: (.[2] | split(" / ")[0] | mib | round)}})
+          | from_entries' || true)"
+    [ -n "$stats_json" ] || stats_json='{}'
+    running_json="$(echo "$running_json" | jq -c --argjson s "$stats_json" 'map(. + ($s[.name] // {}))')"
+  fi
   # ship the last LOG_TAIL lines of every pod (read back by `kubectl logs` via the
   # Virtual Kubelet provider / API facade); LOG_TAIL=0 disables it
   if [ "$LOG_TAIL" -gt 0 ]; then

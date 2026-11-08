@@ -33,6 +33,7 @@ function loadControlPlane(opts) {
   function evaluate(name) {
     // a real Sheet recalculates on every edit; emulate that on read
     if (name === 'Pods' && formulas.Pods && Object.keys(formulas.Pods).length) recalc(store, formulas.Pods);
+    if (name === 'Autoscale' && formulas.Autoscale) require('./formula-port').recalcAutoscale(store, formulas.Autoscale);
   }
   function rangeObj(name, row, col, nr, nc) {
     const g = store[name];

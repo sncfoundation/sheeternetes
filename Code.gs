@@ -28,7 +28,7 @@ const SCHEDULER = 'formula';
 const TABS = {
   Deployments: ['name', 'image', 'replicas', 'cpu_req', 'mem_req', 'command', 'node_selector', 'tolerations'],
   Nodes:       ['name', 'ip', 'cpu_total', 'mem_total', 'cpu_used', 'mem_used', 'status', 'last_heartbeat', 'schedulable', 'labels', 'taints'],
-  Pods:        ['name', 'deployment', 'node', 'phase', 'container_id', 'image', 'cpu_req', 'mem_req', 'command', 'node_ip', 'started_at', 'message', 'node_selector', 'tolerations'],
+  Pods:        ['name', 'deployment', 'node', 'phase', 'container_id', 'image', 'cpu_req', 'mem_req', 'command', 'node_ip', 'started_at', 'message', 'node_selector', 'tolerations', 'cpu_usage', 'mem_usage'],
   Events:      ['ts', 'kind', 'object', 'message'],
   Logs:        ['name', 'node', 'updated_at', 'tail'],
 };
@@ -234,6 +234,9 @@ function reconcile() {
   try {
     const now = Date.now();
     const deployments = readTab('Deployments');
+    // 0) horizontal autoscaling: the Autoscale tab's formulas say how many
+    //    replicas each deployment wants; apply that to the Deployments tab
+    if (autoscale(deployments, now)) writeTab('Deployments', deployments);
     let nodes = readTab('Nodes');
     let pods = readTab('Pods');
 
@@ -371,7 +374,7 @@ function doGet(e) {
     try { return json({ items: listRevisions() }); }
     catch (err) { return json({ error: String(err.message || err) }); }
   }
-  const map = { pods: 'Pods', nodes: 'Nodes', deployments: 'Deployments', events: 'Events', logs: 'Logs' };
+  const map = { pods: 'Pods', nodes: 'Nodes', deployments: 'Deployments', events: 'Events', logs: 'Logs', autoscale: AUTOSCALE, hpa: AUTOSCALE };
   const tab = map[kind];
   if (!tab) return json({ error: 'unknown kind ' + kind });
   let items = readTab(tab);
@@ -420,6 +423,9 @@ function doPost(e) {
         const r = report[p.name];
         if (r) {
           if (r.container_id) p.container_id = r.container_id;
+          // observed usage from `docker stats` (millicores / MiB) — feeds the Autoscale tab
+          if (r.cpu_usage !== undefined) p.cpu_usage = r.cpu_usage;
+          if (r.mem_usage !== undefined) p.mem_usage = r.mem_usage;
           if (p.phase === 'Scheduled') {
             p.phase = 'Running';
             if (!p.started_at) p.started_at = new Date().toISOString();
@@ -504,6 +510,12 @@ function controlOp(body) {
     } else if (body.action === 'delete') {
       deps = deps.filter(d => d.name !== body.name);
       event('Deployment', body.name, 'deleted');
+    } else if (body.action === 'autoscale') {
+      if (!byName[body.deployment]) return json({ error: 'no such deployment ' + body.deployment });
+      if (!(Number(body.target_cpu) > 0)) return json({ error: 'target_cpu must be a positive percentage' });
+      setAutoscale(body);
+      event('Autoscale', body.deployment, 'target ' + body.target_cpu + '% cpu, ' +
+            (body.min_replicas || 1) + '..' + (body.max_replicas || body.min_replicas || 1) + ' replicas');
     } else if (body.action === 'deletePod') {
       // like `kubectl delete pod`: the pod terminates, its Deployment replaces it
       const pods = readTab('Pods');
@@ -535,6 +547,104 @@ function controlOp(body) {
 function json(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---------- horizontal autoscaling: a formula and conditional formatting ----------
+// The Autoscale tab is the HorizontalPodAutoscaler. You fill in the first four
+// columns; the next four are formulas the Sheet recalculates from the Pods tab
+// (the same algorithm as Kubernetes: desired = ceil(current * usage / target),
+// with a 10% tolerance, clamped to [min, max]); conditional formatting paints
+// every row by its status. The reconcile loop only copies desired_replicas into
+// the Deployments tab.
+const AUTOSCALE = 'Autoscale';
+const AUTOSCALE_INPUT = ['deployment', 'target_cpu', 'min_replicas', 'max_replicas'];
+const AUTOSCALE_FORMULA = ['current_replicas', 'cpu_percent', 'desired_replicas', 'status'];
+const AUTOSCALE_STATE = ['last_scale'];
+const HPA_TOLERANCE = 0.1;
+const DOWNSCALE_STABILIZATION_MS = 2 * 60 * 1000;   // no scale-down within 2 min of the last change
+const AUTOSCALE_COLORS = { LimitedByMax: '#f4c7c3', ScalingUp: '#fce8b2', ScalingDown: '#c9daf8', Stable: '#b7e1cd', NoMetrics: '#eeeeee' };
+
+// The four formulas, one per column, each written once into the header row and
+// spilling down next to the user's rows (MAP over column A; nothing else may be
+// typed into columns E:H, or the spill collides).
+function autoscaleFormulas() {
+  const P = c => 'Pods!$' + colLetter(TABS.Pods.indexOf(c) + 1) + ':$' + colLetter(TABS.Pods.indexOf(c) + 1);
+  const running = d => `${P('deployment')},${d},${P('phase')},"Running"`;
+  const cur = d => `COUNTIFS(${running(d)})`;
+  const usage = d => `LET(rq,SUMIFS(${P('cpu_req')},${running(d)},${P('cpu_usage')},"<>"),` +
+                     `IF(rq=0,"",ROUND(SUMIFS(${P('cpu_usage')},${running(d)})/rq*100,0)))`;
+  const plan = (body) => `MAP($A$2:$A,$B$2:$B,$C$2:$C,$D$2:$D,LAMBDA(d,t,mn,mx,IF(d="","",` +
+    `LET(cur,${cur('d')},u,${usage('d')},lo,MAX(1,N(mn)),hi,MAX(lo,IF(mx="",lo,N(mx))),` +
+    `raw,IF(OR(u="",N(t)<=0,cur=0),cur,IF(ABS(u/N(t)-1)<=${HPA_TOLERANCE},cur,CEILING(cur*u/N(t),1))),` +
+    `want,MIN(hi,MAX(lo,raw)),${body}))))`;
+  return {
+    current_replicas: `={"current_replicas";MAP($A$2:$A,LAMBDA(d,IF(d="","",${cur('d')})))}`,
+    cpu_percent: `={"cpu_percent";MAP($A$2:$A,LAMBDA(d,IF(d="","",${usage('d')})))}`,
+    desired_replicas: `={"desired_replicas";${plan('want')}}`,
+    status: `={"status";${plan('IF(u="","NoMetrics",IF(raw>hi,"LimitedByMax",IF(want>cur,"ScalingUp",IF(want<cur,"ScalingDown","Stable"))))')}}`,
+  };
+}
+
+// Creates/repairs the Autoscale tab: headers, formulas, conditional formatting.
+function ensureAutoscale() {
+  const sh = ss().getSheetByName(AUTOSCALE) || ss().insertSheet(AUTOSCALE);
+  sh.getRange(1, 1, 1, AUTOSCALE_INPUT.length).setValues([AUTOSCALE_INPUT]).setFontWeight('bold');
+  const f = autoscaleFormulas();
+  AUTOSCALE_FORMULA.forEach((name, i) => {
+    sh.getRange(1, AUTOSCALE_INPUT.length + 1 + i).setFormula(f[name]).setFontWeight('bold');
+  });
+  const stateCol = AUTOSCALE_INPUT.length + AUTOSCALE_FORMULA.length + 1;
+  sh.getRange(1, stateCol, 1, 1).setValues([AUTOSCALE_STATE]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  const statusCol = colLetter(AUTOSCALE_INPUT.length + AUTOSCALE_FORMULA.indexOf('status') + 1);
+  const range = sh.getRange(2, 1, 999, stateCol);
+  const rules = Object.keys(AUTOSCALE_COLORS).map(st => SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=$' + statusCol + '2="' + st + '"')
+    .setBackground(AUTOSCALE_COLORS[st]).setRanges([range]).build());
+  sh.setConditionalFormatRules(rules);
+  return sh;
+}
+
+// Applies desired_replicas to the Deployments rows (in place). Returns true if any changed.
+function autoscale(deployments, now) {
+  const sh = ss().getSheetByName(AUTOSCALE);
+  if (!sh) return false;
+  const grid = sh.getDataRange().getValues();
+  const header = grid[0] || [];
+  const col = name => header.indexOf(name);
+  if (col('desired_replicas') < 0) return false;
+  const byName = {};
+  deployments.forEach(d => { byName[d.name] = d; });
+  let changed = false;
+  for (let r = 1; r < grid.length; r++) {
+    const row = grid[r];
+    const dep = byName[String(row[col('deployment')] || '')];
+    const want = row[col('desired_replicas')];
+    if (!dep || want === '' || want === null || isNaN(Number(want))) continue;
+    const cur = Number(dep.replicas) || 0;
+    const target = Number(want);
+    if (target === cur) continue;
+    const last = Date.parse(String(row[col('last_scale')] || '')) || 0;
+    if (target < cur && now - last < DOWNSCALE_STABILIZATION_MS) continue;   // let it settle first
+    dep.replicas = target;
+    changed = true;
+    sh.getRange(r + 1, col('last_scale') + 1, 1, 1).setValues([[new Date(now).toISOString()]]);
+    event('Autoscale', dep.name, 'cpu ' + row[col('cpu_percent')] + '% of target ' + row[col('target_cpu')] +
+          '% -> replicas ' + cur + ' -> ' + target + ' (' + row[col('status')] + ')');
+  }
+  return changed;
+}
+
+// skctl autoscale: upsert the user's four columns of one row
+function setAutoscale(spec) {
+  const sh = ss().getSheetByName(AUTOSCALE) || ensureAutoscale();
+  const grid = sh.getDataRange().getValues();
+  let row = grid.findIndex((r, i) => i > 0 && String(r[0]) === String(spec.deployment)) + 1;
+  if (row <= 0) {
+    row = 2;
+    while (row <= grid.length && String((grid[row - 1] || [])[0] || '') !== '') row++;
+  }
+  sh.getRange(row, 1, 1, 4).setValues([[spec.deployment, spec.target_cpu, spec.min_replicas || 1, spec.max_replicas || spec.min_replicas || 1]]);
 }
 
 // ---------- disaster recovery: Google Sheets version history ----------
@@ -650,6 +760,7 @@ function ensureTabs() {
     .setNote('Computed by a Google Sheets formula: the node the scheduler picks for this pod. ' +
              'Do not edit. Set SCHEDULER = \'script\' in Code.gs to schedule in Apps Script instead.');
   syncChosenColumn(pods, Math.max(0, pods.getLastRow() - 1), pods.getLastRow());
+  ensureAutoscale();
 }
 
 function setup() {

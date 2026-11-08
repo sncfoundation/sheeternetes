@@ -13,14 +13,19 @@
 #   skctl scale <deployment> <replicas>
 #   skctl delete <deployment>
 #   skctl cordon|uncordon <node>
+#   skctl autoscale <deployment> --cpu-percent <n> --min <n> --max <n>
+#   skctl get hpa                   # the Autoscale tab
 #   skctl revisions                 # the Sheet's version history
 #   skctl restore --revision <id> | --at <time> [--tabs Deployments,...] [--dry-run]
 #   skctl tour                      # guided demo
 #
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# environment variables win over .skctl.env
+env_url="${WEBAPP_URL:-}"; env_token="${TOKEN:-}"
 # shellcheck source=/dev/null
 [ -f "$here/.skctl.env" ] && . "$here/.skctl.env"
+WEBAPP_URL="${env_url:-${WEBAPP_URL:-}}"; TOKEN="${env_token:-${TOKEN:-}}"
 WEBAPP_URL="${WEBAPP_URL:?set WEBAPP_URL (Apps Script /exec URL)}"
 TOKEN="${TOKEN:-CHANGE_ME_super_secret}"
 
@@ -36,6 +41,7 @@ case "$cmd" in
       pods)        api_get pods | jq -r '["NAME","DEPLOYMENT","NODE","PHASE","CONTAINER"], (.items[]|[.name,.deployment,.node,.phase,(.container_id|tostring|.[0:12])]) | @tsv' | column -t -s $'\t' ;;
       nodes)       api_get nodes | jq -r '["NAME","IP","CPU","CPU_USED","MEM","STATUS","LABELS","TAINTS","HEARTBEAT"], (.items[]|[.name,.ip,.cpu_total,.cpu_used,.mem_total,(.status + (if ((.schedulable|tostring|ascii_upcase) == "FALSE") then ",SchedulingDisabled" else "" end)),(.labels // "" | if . == "" then "<none>" else . end),(.taints // "" | if . == "" then "<none>" else . end),.last_heartbeat]) | @tsv' | column -t -s $'\t' ;;
       deployments|deploy) api_get deployments | jq -r '["NAME","IMAGE","REPLICAS","CPU","MEM"], (.items[]|[.name,.image,.replicas,.cpu_req,.mem_req]) | @tsv' | column -t -s $'\t' ;;
+      hpa|autoscale) api_get autoscale | jq -r '["DEPLOYMENT","TARGET","CPU","MIN","MAX","REPLICAS","DESIRED","STATUS"], (.items[]|[.deployment,((.target_cpu|tostring)+"%"),((.cpu_percent|tostring)+(if .cpu_percent == "" then "<unknown>" else "%" end)),.min_replicas,.max_replicas,.current_replicas,.desired_replicas,.status]) | @tsv' | column -t -s $'\t' ;;
       events)      api_get events | jq -r '.items[-25:][] | [.ts,.kind,.object,.message] | @tsv' | column -t -s $'\t' ;;
       *) echo "unknown kind: $kind" >&2; exit 1 ;;
     esac
@@ -56,6 +62,21 @@ case "$cmd" in
   cordon|uncordon)
     name="${1:?node}"
     api_post "$(jq -n --arg t "$TOKEN" --arg a "$cmd" --arg n "$name" '{token:$t, action:$a, name:$n}')" | jq .
+    ;;
+  autoscale)
+    name="${1:?usage: skctl autoscale <deployment> --cpu-percent <n> [--min <n>] [--max <n>]}"; shift
+    cpu=""; min=1; max=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cpu-percent) cpu="${2:?}"; shift 2 ;;
+        --min) min="${2:?}"; shift 2 ;;
+        --max) max="${2:?}"; shift 2 ;;
+        *) echo "unknown flag $1" >&2; exit 1 ;;
+      esac
+    done
+    [ -n "$cpu" ] || { echo "--cpu-percent is required" >&2; exit 1; }
+    api_post "$(jq -n --arg t "$TOKEN" --arg n "$name" --argjson c "$cpu" --argjson lo "$min" --argjson hi "${max:-$min}" \
+      '{token:$t, action:"autoscale", deployment:$n, target_cpu:$c, min_replicas:$lo, max_replicas:$hi}')" | jq .
     ;;
   revisions)
     api_get revisions | jq -r 'if .error then error(.error) else . end | ["REVISION","MODIFIED"], (.items[] | [.id, .modifiedTime]) | @tsv' | column -t -s $'\t'
