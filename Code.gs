@@ -370,6 +370,8 @@ function doGet(e) {
   const p = e.parameter || {};
   if (p.token !== TOKEN) return json({ error: 'unauthorized' });
   const kind = (p.kind || 'pods').toLowerCase();
+  const addOn = addOnGet(Object.assign({}, p, { kind: kind }));
+  if (addOn) return json(addOn);
   if (kind === 'revisions') {
     try { return json({ items: listRevisions() }); }
     catch (err) { return json({ error: String(err.message || err) }); }
@@ -390,6 +392,8 @@ function doPost(e) {
 
   // kubectl-style control operations (from skctl / the lab)
   if (body.action === 'restore') return restoreOp(body);
+  const addOn = addOnOp(body);
+  if (addOn) return json(addOn);
   if (body.action && body.action !== 'heartbeat') return controlOp(body);
 
   const lock = LockService.getScriptLock();
@@ -542,6 +546,20 @@ function controlOp(body) {
   }
   reconcile();
   return json({ ok: true });
+}
+
+// Volumes (Sheetstor.gs) and script pods (Runtime.gs) serve their own actions and
+// kinds; Code.gs works without those files.
+function addOnOp(body) {
+  if (typeof sheetstorOp === 'function') { const r = sheetstorOp(body); if (r) return r; }
+  if (typeof runtimeOp === 'function') { const r = runtimeOp(body); if (r) return r; }
+  return null;
+}
+
+function addOnGet(p) {
+  if (typeof sheetstorGet === 'function') { const r = sheetstorGet(p); if (r) return r; }
+  if (typeof runtimeGet === 'function') { const r = runtimeGet(p); if (r) return r; }
+  return null;
 }
 
 function json(obj) {
@@ -776,6 +794,7 @@ function setup() {
     if (t.getHandlerFunction() === 'reconcile') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('reconcile').timeBased().everyMinutes(1).create();
+  if (typeof sheetstorEnsure === 'function') sheetstorEnsure();   // the Volumes registry
   event('System', 'setup', 'Sheeternetes initialized');
 }
 
