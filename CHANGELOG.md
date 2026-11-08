@@ -4,7 +4,11 @@ All notable changes to Sheeternetes are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning is based on
 however many zeroes we feel like, because the spreadsheet is eternal.
 
-## [Unreleased]
+## [v0.0.0.0.0.4] — "Version History" — 2026-11-08
+
+The spreadsheet stopped imitating a cluster and started joining them: it schedules
+with a formula, autoscales with conditional formatting, shows up as a Node in real
+Kubernetes, answers `kubectl`, and rolls back through its own version history.
 
 ### Added
 - **The scheduler is a spreadsheet formula.** `setup()` installs a formula into a new
@@ -54,6 +58,7 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 - **Logs** tab: `kubelet.sh` ships the last `LOG_TAIL` lines of each pod on every
   heartbeat (capped at 20,000 characters per pod); `GET ?kind=logs&name=<pod>`.
 - `internal/sheetapi`: a Go client for the Sheet apiserver.
+- `.github/workflows/image.yml`: publishes `ghcr.io/sncfoundation/sheeternetes-vk` on tags.
 - `hack/sheet-mock.js`: one Apps Script mock shared by every harness, with formula
   cells and recalculation.
 - **CI** (`.github/workflows/ci.yml`): runs every `hack/test*.js` control-plane test,
@@ -67,6 +72,14 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 - README certification and verification links now point at the foundation site
   (`certification.html`, `verify.html`) instead of the retired `/sheeternetes/` paths.
 - `local-cluster.sh stop` no longer word-splits the container list (shellcheck SC2046).
+
+### Known limitations
+- Verified against Google Sheets itself: the scheduler and Autoscale formulas (and
+  the conditional-format formula), evaluated in a real spreadsheet. Verified only
+  through the Node.js emulation of Apps Script: the Apps Script glue around them
+  (`setFormula`, `flush`, conditional-format rules), and every Drive call of the
+  revision restore. The Virtual Kubelet and the API facade were tested on kind and
+  with kubectl against the local apiserver, not against a deployed Web App.
 
 ## [v0.0.0.0.0.3] — "Save As…" — 2026-11-08
 
