@@ -27,6 +27,13 @@ however many zeroes we feel like, because the spreadsheet is eternal.
   Ships with a Dockerfile, a manifest (`deploy/sheeternetes-vk.yaml`) and an example
   pod; CI runs it end to end on kind against the local apiserver and a real
   `kubelet.sh`.
+- **Kubernetes API facade** (`kube-facade/`): serves discovery, core/v1 Pods (with
+  `log`), Nodes, Events, Namespaces and apps/v1 Deployments (with `scale`) on top of a
+  Sheet, with server-side Tables, selectors, patches, protobuf bodies and polling
+  watches, so real `kubectl` can get, describe, create, scale, log, watch, cordon and
+  delete. Tested in CI with a real `kubectl` and with client-go.
+- `deletePod` control op: `kubectl delete pod` marks the row Terminating and the
+  Deployment replaces it.
 - **Logs** tab: `kubelet.sh` ships the last `LOG_TAIL` lines of each pod on every
   heartbeat (capped at 20,000 characters per pod); `GET ?kind=logs&name=<pod>`.
 - `internal/sheetapi`: a Go client for the Sheet apiserver.
