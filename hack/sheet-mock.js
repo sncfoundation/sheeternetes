@@ -11,12 +11,20 @@
 const fs = require('fs');
 const path = require('path');
 
+const exposed = new Set();
+
 function loadControlPlane(opts) {
   opts = opts || {};
   let codeText = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
   if (opts.scheduler) {
     codeText = codeText.replace(/const SCHEDULER = '[a-z]+';/, `const SCHEDULER = '${opts.scheduler}';`);
   }
+  // Apps Script runs every .gs file of the project in one global scope, Code.gs first
+  const root = path.join(__dirname, '..');
+  fs.readdirSync(root).filter(f => f.endsWith('.gs') && f !== 'Code.gs').sort()
+    .forEach(f => { codeText += '\n' + fs.readFileSync(path.join(root, f), 'utf8'); });
+  const fakes = require('./gas-fakes').makeFakes(opts);
+  const faults = [];   // tests push (tab, row, col, values) => throws, to inject crashes
   const recalc = opts.recalc || require('./formula-port').recalcPods;
   const store = {};
   const formulas = {};  // tab -> { "r,c": formulaText }
@@ -46,7 +54,11 @@ function loadControlPlane(opts) {
     };
     const o = {
       clearContent() { cells((r, c) => { g[r][c] = ''; delete f[(r + 1) + ',' + (c + 1)]; }); return o; },
-      setValues(v) { cells((r, c, i, j) => { g[r][c] = v[i][j]; delete f[(r + 1) + ',' + (c + 1)]; }); return o; },
+      setValues(v) {
+        faults.forEach(fault => fault(name, row, col, v));
+        v.forEach(r => r.forEach(x => { if (typeof x === 'string' && x.length > 50000) throw new Error('Your input contains more than the maximum of 50000 characters in a single cell.'); }));
+        cells((r, c, i, j) => { g[r][c] = v[i][j]; delete f[(r + 1) + ',' + (c + 1)]; }); return o;
+      },
       setFormula(text) { cells((r, c) => { f[(r + 1) + ',' + (c + 1)] = text; g[r][c] = ''; }); return o; },
       getValues() { evaluate(name); const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = g[r][c] === undefined ? '' : g[r][c]; }); return out; },
       getFormulas() { const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = f[(r + 1) + ',' + (c + 1)] || ''; }); return out; },
@@ -71,6 +83,7 @@ function loadControlPlane(opts) {
         formulas[name] = nf;
       },
       setFrozenRows: () => {},
+      hideSheet: () => {},
       getConditionalFormatRules: () => (sheetApi.cf[name] || []),
       setConditionalFormatRules: (rules) => { sheetApi.cf[name] = rules; },
     };
@@ -133,6 +146,7 @@ function loadControlPlane(opts) {
       getId: () => 'local',
       getSheetByName: (n) => (store[n] ? sheetApi(n) : null),
       insertSheet: (n) => { store[n] = store[n] || [[]]; return sheetApi(n); },
+      deleteSheet: (sh) => { delete store[sh.getName()]; delete formulas[sh.getName()]; },
     }),
     flush: () => {},
     newConditionalFormatRule: () => {
@@ -149,19 +163,22 @@ function loadControlPlane(opts) {
   };
   let uuidN = 0;
   // real getUuid() is random; reversing a base36 counter makes the first chars vary
-  const Utilities = { getUuid: () => (++uuidN).toString(36).split('').reverse().join('').padEnd(8, '0') };
-  const LockService = { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) };
+  const Utilities = Object.assign({}, fakes.Utilities, { getUuid: () => (++uuidN).toString(36).split('').reverse().join('').padEnd(8, '0') });
+  const LockService = fakes.LockService;
   const ContentService = { MimeType: { JSON: 'json' },
     createTextOutput: (t) => ({ _t: t, setMimeType() { return this; } }) };
-  const ScriptApp = { getProjectTriggers: () => [], getOAuthToken: () => 'mock-token',
-    newTrigger: () => ({ timeBased: () => ({ everyMinutes: () => ({ create() {} }) }) }) };
-  const globals = { SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp, UrlFetchApp };
+  const ScriptApp = fakes.ScriptApp;
+  const globals = { SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp, UrlFetchApp,
+                    PropertiesService: fakes.PropertiesService, HtmlService: fakes.HtmlService, Session: fakes.Session };
   if (!opts.noDrive) globals.Drive = Drive;   // the advanced service is opt-in in Apps Script
   Object.assign(globals, opts.globals || {});
 
   const exportsList = ['doGet', 'doPost', 'setup', 'reconcile', 'controlOp', 'readTab', 'writeTab',
     'scheduleScript', 'schedulerFormula', 'ensureTabs', 'TABS', 'SCHEDULER'].concat(opts.exports || []);
   const names = Object.keys(globals);
+  // pod source compiled with new Function() sees only real globals, as in Apps Script
+  exposed.forEach(n => { if (!(n in globals)) delete globalThis[n]; });
+  names.forEach(n => { globalThis[n] = globals[n]; exposed.add(n); });
   const api = new Function(...names,
     codeText + '\nreturn {' + exportsList.map(n => `${n}: (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',') + '};'
   )(...names.map(n => globals[n]));
@@ -172,6 +189,10 @@ function loadControlPlane(opts) {
   api._revisions = revisions;
   api._trashed = trashed;
   api._setClock = (f) => { clock = f; };
+  api._faults = faults;
+  api._props = fakes._props;
+  api._triggers = fakes._triggers;
+  api._lock = fakes._lock;
   return api;
 }
 
