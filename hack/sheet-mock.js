@@ -24,7 +24,8 @@ function loadControlPlane(opts) {
   fs.readdirSync(root).filter(f => f.endsWith('.gs') && f !== 'Code.gs').sort()
     .forEach(f => { codeText += '\n' + fs.readFileSync(path.join(root, f), 'utf8'); });
   const fakes = require('./gas-fakes').makeFakes(opts);
-  const faults = [];   // tests push (tab, row, col, values) => throws, to inject crashes
+  const faults = [];
+  const reads = {};    // tab -> number of reads, so tests can prove a path never touches a tab   // tests push (tab, row, col, values) => throws, to inject crashes
   const recalc = opts.recalc || require('./formula-port').recalcPods;
   const store = {};
   const formulas = {};  // tab -> { "r,c": formulaText }
@@ -60,7 +61,7 @@ function loadControlPlane(opts) {
         cells((r, c, i, j) => { g[r][c] = v[i][j]; delete f[(r + 1) + ',' + (c + 1)]; }); return o;
       },
       setFormula(text) { cells((r, c) => { f[(r + 1) + ',' + (c + 1)] = text; g[r][c] = ''; }); return o; },
-      getValues() { evaluate(name); const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = g[r][c] === undefined ? '' : g[r][c]; }); return out; },
+      getValues() { reads[name] = (reads[name] || 0) + 1; evaluate(name); const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = g[r][c] === undefined ? '' : g[r][c]; }); return out; },
       getFormulas() { const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = f[(r + 1) + ',' + (c + 1)] || ''; }); return out; },
       setFontWeight() { return o; }, setNote() { return o; }, setBackground() { return o; },
       setFontColor() { return o; }, setNumberFormat() { return o; },
@@ -70,7 +71,7 @@ function loadControlPlane(opts) {
   function sheetApi(name) {
     return {
       getName: () => name,
-      getDataRange: () => ({ getValues: () => { evaluate(name); return store[name].map(r => r.slice()); } }),
+      getDataRange: () => ({ getValues: () => { reads[name] = (reads[name] || 0) + 1; evaluate(name); return store[name].map(r => r.slice()); } }),
       getRange: (r, c, nr, nc) => rangeObj(name, r, c, nr || 1, nc || 1),
       getLastRow: () => lastNonEmpty(store[name], formulas[name]),
       getLastColumn: () => Math.max(1, ...store[name].map(r => r.length)),
@@ -169,7 +170,8 @@ function loadControlPlane(opts) {
     createTextOutput: (t) => ({ _t: t, setMimeType() { return this; } }) };
   const ScriptApp = fakes.ScriptApp;
   const globals = { SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp, UrlFetchApp,
-                    PropertiesService: fakes.PropertiesService, HtmlService: fakes.HtmlService, Session: fakes.Session };
+                    PropertiesService: fakes.PropertiesService, HtmlService: fakes.HtmlService, Session: fakes.Session,
+                    CacheService: fakes.CacheService };
   if (!opts.noDrive) globals.Drive = Drive;   // the advanced service is opt-in in Apps Script
   Object.assign(globals, opts.globals || {});
 
@@ -190,6 +192,7 @@ function loadControlPlane(opts) {
   api._trashed = trashed;
   api._setClock = (f) => { clock = f; };
   api._faults = faults;
+  api._reads = reads;
   api._props = fakes._props;
   api._triggers = fakes._triggers;
   api._lock = fakes._lock;
