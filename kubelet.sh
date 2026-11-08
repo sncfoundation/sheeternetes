@@ -22,6 +22,8 @@ NODE_IP="${NODE_IP:-127.0.0.1}"
 CPU_TOTAL="${CPU_TOTAL:-$(( $(nproc 2>/dev/null || echo 2) * 1000 ))}"   # millicores
 MEM_TOTAL="${MEM_TOTAL:-2048}"                                            # MiB
 INTERVAL="${INTERVAL:-10}"                                                # seconds
+NODE_LABELS="${NODE_LABELS:-}"      # e.g. disk=ssd,zone=eu   (matched by node_selector)
+NODE_TAINTS="${NODE_TAINTS:-}"      # e.g. gpu=true:NoSchedule (needs a toleration)
 
 echo "[kubelet] node=$NODE_NAME ip=$NODE_IP cpu=${CPU_TOTAL}m mem=${MEM_TOTAL}Mi -> $WEBAPP_URL"
 
@@ -51,7 +53,8 @@ while true; do
           --arg t "$TOKEN" --arg n "$NODE_NAME" --arg ip "$NODE_IP" \
           --argjson cpu "$CPU_TOTAL" --argjson mem "$MEM_TOTAL" \
           --argjson pods "$running_json" \
-          '{token:$t, node:$n, ip:$ip, cpu_total:$cpu, mem_total:$mem, pods:$pods}')" \
+          --arg labels "$NODE_LABELS" --arg taints "$NODE_TAINTS" \
+          '{token:$t, node:$n, ip:$ip, cpu_total:$cpu, mem_total:$mem, labels:$labels, taints:$taints, pods:$pods}')" \
     || echo '{"pods":[]}')"
 
   desired="$(echo "$resp" | jq -c '.pods // []')"

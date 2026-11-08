@@ -17,12 +17,26 @@
 const TOKEN = 'CHANGE_ME_super_secret';   // must match kubelet.sh / skctl
 const HEARTBEAT_TIMEOUT_MS = 90 * 1000;   // node considered NotReady after this
 
+// Who places pods on nodes:
+//   'formula' (default) — a Google Sheets formula in the Pods tab's `chosen` column
+//                         does the scheduling; Apps Script only reads the result.
+//   'script'            — the same algorithm in Apps Script (scheduleScript below).
+// If the formula column ever returns an error (#NAME?, #REF!, …) the loop falls back
+// to 'script' for that pass and records an Event.
+const SCHEDULER = 'formula';
+
 const TABS = {
-  Deployments: ['name', 'image', 'replicas', 'cpu_req', 'mem_req', 'command'],
-  Nodes:       ['name', 'ip', 'cpu_total', 'mem_total', 'cpu_used', 'mem_used', 'status', 'last_heartbeat'],
-  Pods:        ['name', 'deployment', 'node', 'phase', 'container_id', 'image', 'cpu_req', 'mem_req', 'command', 'node_ip', 'started_at', 'message'],
+  Deployments: ['name', 'image', 'replicas', 'cpu_req', 'mem_req', 'command', 'node_selector', 'tolerations'],
+  Nodes:       ['name', 'ip', 'cpu_total', 'mem_total', 'cpu_used', 'mem_used', 'status', 'last_heartbeat', 'schedulable', 'labels', 'taints'],
+  Pods:        ['name', 'deployment', 'node', 'phase', 'container_id', 'image', 'cpu_req', 'mem_req', 'command', 'node_ip', 'started_at', 'message', 'node_selector', 'tolerations'],
   Events:      ['ts', 'kind', 'object', 'message'],
 };
+// The scheduler formula lives in the column right after the Pods data columns.
+// writeTab() never writes it, so the formulas survive every reconcile.
+const CHOSEN_HEADER = 'chosen';
+const CHOSEN_COL = TABS.Pods.length + 1;
+const DEPLOYMENT_SPEC = ['image', 'replicas', 'cpu_req', 'mem_req', 'command', 'node_selector', 'tolerations'];
+const POD_SPEC = ['image', 'command', 'cpu_req', 'mem_req', 'node_selector', 'tolerations'];
 
 // ---------- generic sheet <-> objects ----------
 function ss() { return SpreadsheetApp.getActiveSpreadsheet(); }
@@ -48,6 +62,7 @@ function writeTab(name, objects) {
   const lastRow = sh.getLastRow();
   if (lastRow > 1) sh.getRange(2, 1, lastRow - 1, header.length).clearContent();
   if (rows.length) sh.getRange(2, 1, rows.length, header.length).setValues(rows);
+  if (name === 'Pods') syncChosenColumn(sh, rows.length, lastRow);
 }
 
 function event(kind, object, message) {
@@ -59,6 +74,151 @@ function event(kind, object, message) {
 }
 
 function shortId() { return Utilities.getUuid().replace(/-/g, '').substring(0, 10); }
+
+// ---------- the scheduler ----------
+// One algorithm, two implementations that must agree (hack/test-formula-scheduler.js):
+// a Google Sheets formula (schedulerFormula) and plain Apps Script (scheduleScript).
+//
+// Rows are visited top to bottom. For each live pod:
+//   * sticky: it stays on its current node if that node is Ready, still matches its
+//     node_selector / tolerations and still has room after the rows above it
+//     (a cordoned node keeps its pods — cordon only blocks newcomers);
+//   * otherwise it goes to the Ready, schedulable, matching node with the most free
+//     CPU that fits both CPU and memory (first node wins a tie);
+//   * otherwise it is Unschedulable ('').
+// node_selector 'k=v,k2=v2' must be a subset of the node's labels; a node taint
+// 'k=v:NoSchedule' (or bare 'k=v') must be tolerated by 'k=v' or 'k' in tolerations.
+const UNSCHEDULABLE = 'Unschedulable: no Ready node with enough CPU and memory that matches node_selector/tolerations';
+
+function isLivePod(p) { return p.phase !== 'Terminating' && p.phase !== 'Deleted' && String(p.phase || '') !== ''; }
+
+// placed pods first (they keep their seats), then Pending, then Terminating
+function orderForScheduling(pods) {
+  const rank = p => (!isLivePod(p) ? 2 : (p.node ? 0 : 1));
+  return pods.map((p, i) => [p, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0]);
+}
+
+function kvList(s) { return String(s === undefined || s === null ? '' : s).split(',').map(x => x.trim()).filter(Boolean); }
+
+function nodeMatches(node, pod) {
+  const labels = kvList(node.labels);
+  if (!kvList(pod.node_selector).every(sel => labels.indexOf(sel) >= 0)) return false;
+  const tol = kvList(pod.tolerations);
+  return kvList(node.taints).every(t => {
+    const effect = t.indexOf(':') >= 0 ? t.slice(t.indexOf(':') + 1) : 'NoSchedule';
+    if (effect !== 'NoSchedule') return true;
+    const kv = t.split(':')[0];
+    return tol.indexOf(kv) >= 0 || tol.indexOf(kv.split('=')[0]) >= 0;
+  });
+}
+
+function isSchedulable(node) {
+  return ['FALSE', '0', 'NO'].indexOf(String(node.schedulable === undefined ? '' : node.schedulable).toUpperCase()) < 0;
+}
+
+// Plain Apps Script implementation. Returns the node per pod row ('' = none).
+function scheduleScript(pods, nodes) {
+  const ready = nodes.filter(n => String(n.name || '') !== '' && n.status === 'Ready');
+  const free = {};
+  ready.forEach(n => { free[n.name] = { cpu: Number(n.cpu_total) || 0, mem: Number(n.mem_total) || 0 }; });
+  const fits = (n, p) => nodeMatches(n, p) &&
+    free[n.name].cpu >= (Number(p.cpu_req) || 0) && free[n.name].mem >= (Number(p.mem_req) || 0);
+  const out = pods.map(p => {
+    if (!isLivePod(p)) return '';
+    let target = '';
+    const prev = ready.find(n => n.name === p.node);
+    if (prev && fits(prev, p)) {
+      target = prev.name;
+    } else {
+      let bestFree = -1;
+      ready.forEach(n => {
+        if (isSchedulable(n) && fits(n, p) && free[n.name].cpu > bestFree) { target = n.name; bestFree = free[n.name].cpu; }
+      });
+    }
+    if (target) { free[target].cpu -= Number(p.cpu_req) || 0; free[target].mem -= Number(p.mem_req) || 0; }
+    return target;
+  });
+  out.by = 'script';
+  return out;
+}
+
+// Formula implementation: write Nodes + Pods, let the Sheet recalculate the
+// `chosen` column, read it back. Returns null if any cell is an error.
+function formulaSchedule(pods, nodes) {
+  writeTab('Nodes', nodes);
+  writeTab('Pods', pods);
+  SpreadsheetApp.flush();
+  const sh = ss().getSheetByName('Pods');
+  if (!pods.length) return [];
+  const vals = sh.getRange(2, CHOSEN_COL, pods.length, 1).getValues();
+  const out = [];
+  for (let i = 0; i < pods.length; i++) {
+    const v = String(vals[i][0] === undefined || vals[i][0] === null ? '' : vals[i][0]);
+    if (v.charAt(0) === '#') return null;          // #NAME?, #REF!, #ERROR!, #N/A …
+    if (v && !nodes.some(n => n.name === v)) return null;
+    out.push(isLivePod(pods[i]) ? v : '');
+  }
+  out.by = 'formula';
+  return out;
+}
+
+// Keep exactly one formula per data row in the `chosen` column.
+function syncChosenColumn(sh, rowCount, previousLastRow) {
+  if (SCHEDULER === 'formula' && rowCount > 0) {
+    sh.getRange(2, CHOSEN_COL, rowCount, 1).setFormula(schedulerFormula());
+  }
+  const from = (SCHEDULER === 'formula' ? rowCount : 0) + 2;
+  if (previousLastRow >= from) sh.getRange(from, CHOSEN_COL, previousLastRow - from + 1, 1).clearContent();
+}
+
+function colLetter(n) { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
+
+// The scheduler as ONE spreadsheet formula, identical in every row of the Pods tab
+// (row-independent: it finds "its" row with ROW()). Gotchas it avoids:
+//   * no spilling arrays — every cell returns a scalar, so nothing can collide;
+//   * no array-array arithmetic (Sheets may collapse it) — per-node values are
+//     computed inside MAP(LAMBDA) with XLOOKUP;
+//   * "rows above" is the growing range $X$2:INDEX($X:$X,ROW()-1), so pasting the
+//     same text into every row works without relative-reference adjustment.
+function schedulerFormula(nodesSheet) {
+  const N = (nodesSheet || 'Nodes') + '!';
+  const nc = c => colLetter(TABS.Nodes.indexOf(c) + 1);
+  const pc = c => colLetter(TABS.Pods.indexOf(c) + 1);
+  const O = colLetter(CHOSEN_COL);
+  const nodeCol = c => `FILTER(${N}$${nc(c)}$2:$${nc(c)},${N}$A$2:$A<>"")`;
+  const here = c => `INDEX($${pc(c)}:$${pc(c)},ROW())`;
+  const usedAbove = c => `IF(ROW()=2,0,SUMIFS($${pc(c)}$2:INDEX($${pc(c)}:$${pc(c)},ROW()-1),$${O}$2:INDEX($${O}:$${O},ROW()-1),q))`;
+  return '=IF(COUNTA(' + N + '$A$2:$A)=0,"",LET(' + [
+    `nm,${nodeCol('name')}`,
+    `ct,${nodeCol('cpu_total')}`,
+    `mt,${nodeCol('mem_total')}`,
+    `st,${nodeCol('status')}`,
+    `sc,${nodeCol('schedulable')}`,
+    `lb,${nodeCol('labels')}`,
+    `tn,${nodeCol('taints')}`,
+    `ph,${here('phase')}`,
+    `creq,N(${here('cpu_req')})`,
+    `mreq,N(${here('mem_req')})`,
+    `sel,SUBSTITUTE(${here('node_selector')}," ","")`,
+    `tol,SUBSTITUTE(${here('tolerations')}," ","")`,
+    `prev,${here('node')}`,
+    `ucpu,LAMBDA(q,${usedAbove('cpu_req')})`,
+    `umem,LAMBDA(q,${usedAbove('mem_req')})`,
+    // node_selector pairs all present in the node's labels
+    'selok,LAMBDA(q,LET(l,SUBSTITUTE(XLOOKUP(q,nm,lb)," ",""),IF(sel="",TRUE,' +
+      'SUMPRODUCT(--ISNUMBER(FIND(","&SPLIT(sel,",")&",",","&l&",")))=COUNTA(SPLIT(sel,",")))))',
+    // every NoSchedule taint tolerated by "k=v" or "k"
+    'tainok,LAMBDA(q,LET(t,SUBSTITUTE(XLOOKUP(q,nm,tn)," ",""),IF(t="",TRUE,' +
+      'SUMPRODUCT(ARRAYFORMULA(((1-REGEXMATCH(SPLIT(t,","),":"))+REGEXMATCH(SPLIT(t,","),":NoSchedule$"))' +
+      '*ISERROR(FIND(","&REGEXREPLACE(SPLIT(t,","),":.*$","")&",",","&tol&","))' +
+      '*ISERROR(FIND(","&REGEXREPLACE(SPLIT(t,","),"[=:].*$","")&",",","&tol&","))))=0)))',
+    'fits,LAMBDA(q,AND(XLOOKUP(q,nm,st)="Ready",selok(q),tainok(q),XLOOKUP(q,nm,ct)-ucpu(q)>=creq,XLOOKUP(q,nm,mt)-umem(q)>=mreq))',
+    'score,MAP(nm,LAMBDA(q,IF(AND(fits(q),ISERROR(MATCH(UPPER(""&XLOOKUP(q,nm,sc)),{"FALSE";"0";"NO"},0))),XLOOKUP(q,nm,ct)-ucpu(q),-1)))',
+    'best,IF(MAX(score)<0,"",XLOOKUP(MAX(score),score,nm))',
+    'pok,IF(prev="",FALSE,IF(ISNA(MATCH(prev,nm,0)),FALSE,fits(prev)))',
+    'IF(OR(ph="",ph="Terminating",ph="Deleted"),"",IF(pok,prev,best))',
+  ].join(',') + '))';
+}
 
 // ---------- the control loop ----------
 function reconcile() {
@@ -106,6 +266,7 @@ function reconcile() {
           node: '', phase: 'Pending', container_id: '',
           image: dep.image, cpu_req: dep.cpu_req, mem_req: dep.mem_req,
           command: dep.command, node_ip: '', started_at: '', message: '',
+          node_selector: dep.node_selector || '', tolerations: dep.tolerations || '',
         };
         pods.push(pod); mine.push(pod);
         event('Pod', pod.name, 'created for deployment ' + dep.name);
@@ -133,10 +294,8 @@ function reconcile() {
     // with the new spec on the next reconcile) -> gradual, maxUnavailable=1.
     deployments.forEach(dep => {
       const live = pods.filter(p => p.deployment === dep.name && p.phase !== 'Terminating');
-      const drift = (p) => String(p.image) !== String(dep.image) ||
-                           String(p.command || '') !== String(dep.command || '') ||
-                           String(p.cpu_req) !== String(dep.cpu_req) ||
-                           String(p.mem_req) !== String(dep.mem_req);
+      const drift = (p) => POD_SPEC.some(k => String(p[k] === undefined ? '' : p[k]) !==
+                                              String(dep[k] === undefined ? '' : dep[k]));
       const stale = live.find(drift);
       const rolling = live.some(p => p.phase === 'Pending' || p.phase === 'Scheduled');
       // only roll when at desired count and nothing is mid-roll, to avoid churn
@@ -146,32 +305,34 @@ function reconcile() {
       }
     });
 
-    // 6) scheduler: place each Pending pod on the Ready node with the most free
-    //    CPU that ALSO has enough free memory (bin-pack on both dimensions).
-    const freeCpu = {}, freeMem = {};
-    readyNodes.forEach(n => { freeCpu[n.name] = Number(n.cpu_total) || 0; freeMem[n.name] = Number(n.mem_total) || 0; });
-    // subtract already-placed pods
-    pods.forEach(p => {
-      if (p.node && freeCpu[p.node] !== undefined && p.phase !== 'Terminating') {
-        freeCpu[p.node] -= (Number(p.cpu_req) || 0);
-        freeMem[p.node] -= (Number(p.mem_req) || 0);
+    // 6) scheduler. Rows are ordered placed-first, so a single top-to-bottom pass
+    //    keeps running pods where they are (sticky) before newcomers are placed —
+    //    the same two-phase behaviour as the on-prem schedule(). The pass itself is
+    //    done either by the formula in the Pods tab or by scheduleScript().
+    pods = orderForScheduling(pods);
+    let chosen = null;
+    if (SCHEDULER === 'formula') {
+      chosen = formulaSchedule(pods, nodes);
+      if (!chosen) event('System', 'scheduler', 'formula column returned an error -> script fallback for this pass');
+    }
+    if (!chosen) chosen = scheduleScript(pods, nodes);
+    const nodeByName = {};
+    nodes.forEach(n => { nodeByName[n.name] = n; });
+    pods.forEach((p, i) => {
+      if (p.phase === 'Terminating' || p.phase === 'Deleted') return;
+      const c = chosen[i] || '';
+      if (c === (p.node || '')) {
+        if (!c) p.message = UNSCHEDULABLE;
+        return;
       }
-    });
-    pods.filter(p => p.phase === 'Pending').forEach(p => {
-      let best = null, bestFree = -1;
-      readyNodes.forEach(n => {
-        const fitsCpu = freeCpu[n.name] - (Number(p.cpu_req) || 0) >= 0;
-        const fitsMem = freeMem[n.name] - (Number(p.mem_req) || 0) >= 0;
-        if (fitsCpu && fitsMem && freeCpu[n.name] > bestFree) { best = n; bestFree = freeCpu[n.name]; }
-      });
-      if (best) {
-        p.node = best.name; p.node_ip = best.ip; p.phase = 'Scheduled';
-        freeCpu[best.name] -= (Number(p.cpu_req) || 0);
-        freeMem[best.name] -= (Number(p.mem_req) || 0);
-        event('Pod', p.name, 'scheduled on ' + best.name);
-      } else {
-        p.message = 'Unschedulable: no node with enough CPU and memory';
+      if (!c) {
+        event('Pod', p.name, 'no longer fits ' + p.node + ' -> Pending');
+        p.node = ''; p.node_ip = ''; p.container_id = ''; p.phase = 'Pending'; p.message = UNSCHEDULABLE;
+        return;
       }
+      if (p.node) event('Pod', p.name, 'moved from ' + p.node + ' to ' + c + ' (no longer fits or matches)');
+      else event('Pod', p.name, 'scheduled on ' + c + ' (' + (chosen.by || SCHEDULER) + ')');
+      p.node = c; p.node_ip = nodeByName[c].ip; p.phase = 'Scheduled'; p.container_id = ''; p.message = '';
     });
 
     // 7) recompute node usage
@@ -227,6 +388,8 @@ function doPost(e) {
       event('Node', body.node, 'registered (' + body.ip + ', cpu=' + body.cpu_total + 'm)');
     }
     node.ip = body.ip;
+    if (body.labels) node.labels = body.labels;      // empty = keep what is in the Sheet
+    if (body.taints) node.taints = body.taints;
     if (body.cpu_total) node.cpu_total = body.cpu_total;
     if (body.mem_total) node.mem_total = body.mem_total;
     node.last_heartbeat = new Date().toISOString();
@@ -291,14 +454,15 @@ function controlOp(body) {
       (body.deployments || []).forEach(spec => {
         const d = byName[spec.name];
         if (d) {
-          ['image', 'replicas', 'cpu_req', 'mem_req', 'command'].forEach(k => {
+          DEPLOYMENT_SPEC.forEach(k => {
             if (spec[k] !== undefined) d[k] = spec[k];
           });
           event('Deployment', spec.name, 'configured');
         } else {
           const nd = { name: spec.name, image: spec.image, replicas: spec.replicas,
                        cpu_req: spec.cpu_req || 100, mem_req: spec.mem_req || 64,
-                       command: spec.command || '' };
+                       command: spec.command || '',
+                       node_selector: spec.node_selector || '', tolerations: spec.tolerations || '' };
           deps.push(nd); byName[spec.name] = nd;
           event('Deployment', spec.name, 'created');
         }
@@ -311,6 +475,13 @@ function controlOp(body) {
     } else if (body.action === 'delete') {
       deps = deps.filter(d => d.name !== body.name);
       event('Deployment', body.name, 'deleted');
+    } else if (body.action === 'cordon' || body.action === 'uncordon') {
+      const nodes = readTab('Nodes');
+      const n = nodes.find(x => x.name === body.name);
+      if (!n) return json({ error: 'no such node ' + body.name });
+      n.schedulable = body.action === 'uncordon';
+      writeTab('Nodes', nodes);
+      event('Node', body.name, body.action === 'cordon' ? 'cordoned (SchedulingDisabled)' : 'uncordoned');
     } else {
       return json({ error: 'unknown action ' + body.action });
     }
@@ -328,12 +499,23 @@ function json(obj) {
 }
 
 // ---------- one-time setup ----------
-function setup() {
+// Creates the tabs and header rows (idempotent; also upgrades an older sheet by
+// appending the new columns) and installs the scheduler formula column.
+function ensureTabs() {
   Object.keys(TABS).forEach(name => {
     let sh = ss().getSheetByName(name) || ss().insertSheet(name);
     sh.getRange(1, 1, 1, TABS[name].length).setValues([TABS[name]]).setFontWeight('bold');
     sh.setFrozenRows(1);
   });
+  const pods = ss().getSheetByName('Pods');
+  pods.getRange(1, CHOSEN_COL, 1, 1).setValues([[CHOSEN_HEADER]]).setFontWeight('bold')
+    .setNote('Computed by a Google Sheets formula: the node the scheduler picks for this pod. ' +
+             'Do not edit. Set SCHEDULER = \'script\' in Code.gs to schedule in Apps Script instead.');
+  syncChosenColumn(pods, Math.max(0, pods.getLastRow() - 1), pods.getLastRow());
+}
+
+function setup() {
+  ensureTabs();
   // sample deployment (nginx x3)
   const dep = ss().getSheetByName('Deployments');
   if (dep.getLastRow() < 2) {
