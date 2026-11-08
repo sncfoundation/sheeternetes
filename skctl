@@ -12,6 +12,7 @@
 #   skctl apply lab/hello-web.json
 #   skctl scale <deployment> <replicas>
 #   skctl delete <deployment>
+#   skctl cordon|uncordon <node>
 #   skctl tour                      # guided demo
 #
 set -euo pipefail
@@ -31,7 +32,7 @@ case "$cmd" in
     kind="${1:-pods}"
     case "$kind" in
       pods)        api_get pods | jq -r '["NAME","DEPLOYMENT","NODE","PHASE","CONTAINER"], (.items[]|[.name,.deployment,.node,.phase,(.container_id|tostring|.[0:12])]) | @tsv' | column -t -s $'\t' ;;
-      nodes)       api_get nodes | jq -r '["NAME","IP","CPU","CPU_USED","MEM","STATUS","HEARTBEAT"], (.items[]|[.name,.ip,.cpu_total,.cpu_used,.mem_total,.status,.last_heartbeat]) | @tsv' | column -t -s $'\t' ;;
+      nodes)       api_get nodes | jq -r '["NAME","IP","CPU","CPU_USED","MEM","STATUS","LABELS","TAINTS","HEARTBEAT"], (.items[]|[.name,.ip,.cpu_total,.cpu_used,.mem_total,(.status + (if ((.schedulable|tostring|ascii_upcase) == "FALSE") then ",SchedulingDisabled" else "" end)),(.labels // "" | if . == "" then "<none>" else . end),(.taints // "" | if . == "" then "<none>" else . end),.last_heartbeat]) | @tsv' | column -t -s $'\t' ;;
       deployments|deploy) api_get deployments | jq -r '["NAME","IMAGE","REPLICAS","CPU","MEM"], (.items[]|[.name,.image,.replicas,.cpu_req,.mem_req]) | @tsv' | column -t -s $'\t' ;;
       events)      api_get events | jq -r '.items[-25:][] | [.ts,.kind,.object,.message] | @tsv' | column -t -s $'\t' ;;
       *) echo "unknown kind: $kind" >&2; exit 1 ;;
@@ -49,6 +50,10 @@ case "$cmd" in
   delete)
     name="${1:?deployment}"
     api_post "$(jq -n --arg t "$TOKEN" --arg n "$name" '{token:$t, action:"delete", name:$n}')" | jq .
+    ;;
+  cordon|uncordon)
+    name="${1:?node}"
+    api_post "$(jq -n --arg t "$TOKEN" --arg a "$cmd" --arg n "$name" '{token:$t, action:$a, name:$n}')" | jq .
     ;;
   tour)
     exec "$here/lab/tour.sh"

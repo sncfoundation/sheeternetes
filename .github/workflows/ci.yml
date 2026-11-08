@@ -25,6 +25,8 @@ jobs:
             node "$t"
             echo "::endgroup::"
           done
+      - name: Same suite on the Apps Script scheduler
+        run: SCHEDULER=script node hack/test.js
 
   shell:
     name: Shell scripts (bash -n + shellcheck)

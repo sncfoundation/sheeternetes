@@ -16,7 +16,7 @@ Status legend: 🟢 shipped · 🟡 in progress · ⚪ planned · 💭 idea
 Delivered since this roadmap was written — some were "ideas" above, some are net-new:
 
 - **Cross-substrate federation** — Sheetwire networking, capacity `stretch`, and live `migrate` across an Excel cluster and a Google Sheets cluster (see Sheetmesh #6).
-- **Formula scheduler** — the scheduler (bin-packing, capacity, affinity, taints, cordon, sticky) reimplemented as a pure Google Sheets formula; matches the Python `schedule()` on all its unit tests.
+- **Formula scheduler** — the scheduler (bin-packing, capacity, affinity, taints, cordon, sticky) reimplemented as a pure Google Sheets formula; matches the Python `schedule()` on all its unit tests. **Now the default scheduler of the product:** `setup()` installs it into the Pods tab and the reconcile loop reads its result.
 - **SICF — the Sheet Container Initiative** — an on-sheet OCI image format (layers as sha256-addressed base64 cells) with a `sheetbuild` round-trip tool, load-tested; plus a container registry merged into SheetHub.
 - **SheetsOperator** — a canonical operator for Google Sheets (control plane → controller → self-healing managed sheets).
 - **wasmlet** — a sheet-native WASM/WASI runtime (see SheetAssembly #24).

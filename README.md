@@ -67,7 +67,7 @@ charges you a platform team to operate has a direct, load-bearing equivalent bel
 | --- | --- |
 | etcd (desired + observed state) | tabs in the Google Sheet |
 | kube-apiserver | Apps Script Web App (`doGet`/`doPost`) |
-| scheduler (bin-packing) | `reconcile()` picks the Ready node with most free CPU |
+| kube-scheduler | **a spreadsheet formula** in the Pods tab's `chosen` column (bin-packing, affinity, taints, cordon); Apps Script fallback |
 | controllers / reconcile loop | `reconcile()` on every heartbeat + a 1-minute timer |
 | kubelet | `kubelet.sh` polling loop on each host |
 | kubectl | `skctl` |
@@ -79,9 +79,9 @@ that node should be running. The node converges. That's the whole system.
 
 ## The Sheet (four tabs)
 
-- **Deployments** — *you edit this.* `name, image, replicas, cpu_req (millicores), mem_req (MiB), command`
-- **Nodes** — written by kubelets: capacity, usage, `status`, `last_heartbeat`
-- **Pods** — written by the control loop: `phase` (Pending → Scheduled → Running → Terminating → Deleted), which node, container id
+- **Deployments** — *you edit this.* `name, image, replicas, cpu_req (millicores), mem_req (MiB), command, node_selector, tolerations`
+- **Nodes** — written by kubelets: capacity, usage, `status`, `last_heartbeat`; you may edit `schedulable` (cordon), `labels`, `taints`
+- **Pods** — written by the control loop: `phase` (Pending → Scheduled → Running → Terminating → Deleted), which node, container id — plus the `chosen` column, where a formula schedules every pod
 - **Events** — an audit log of scheduling / scaling / eviction decisions
 
 ## Prerequisites
@@ -149,6 +149,55 @@ Or fake a 3-node cluster on one machine:
 ./skctl get events
 ```
 
+## The scheduler is a formula
+
+kube-scheduler, as a spreadsheet formula. `setup()` installs one formula per row
+into the Pods tab's `chosen` column; on every reconcile Apps Script writes the
+Pods and Nodes tabs, lets Google Sheets recalculate, and reads the node each row
+chose. No scheduling logic runs in the script unless you ask for it.
+
+The formula implements what the on-prem Python `schedule()` does:
+
+- **bin-packing** — most free CPU wins, and the pod must fit both CPU and memory;
+- **sticky placement** — a placed pod stays where it is while its node is Ready,
+  still matches and still has room (placed rows are kept on top, so a single
+  top-to-bottom pass behaves like the two-phase Python scheduler);
+- **cordon** — `schedulable = FALSE` keeps existing pods, blocks newcomers
+  (`skctl cordon node-a`);
+- **node affinity** — `node_selector: "disk=ssd,zone=eu"` must be a subset of the
+  node's `labels` (kubelet: `NODE_LABELS=disk=ssd`);
+- **taints / tolerations** — a node taint `gpu=true:NoSchedule` (or bare `gpu=true`)
+  repels pods unless they tolerate `gpu=true` or `gpu`; `PreferNoSchedule` and
+  `NoExecute` taints are ignored, as in the on-prem scheduler (kubelet:
+  `NODE_TAINTS=gpu=true:NoSchedule`);
+- **Unschedulable** — an empty cell; the pod stays Pending with a message.
+
+It is written to dodge the Google Sheets traps we hit while proving it: every
+cell returns a scalar (no spilled arrays to collide with neighbours), per-node
+values are computed inside `MAP(LAMBDA)` with `XLOOKUP` (array-to-array arithmetic
+can collapse), and "the rows above me" is the growing range
+`$G$2:INDEX($G:$G,ROW()-1)` so the same text works in every row.
+
+`SCHEDULER = 'script'` at the top of `Code.gs` switches to `scheduleScript()`, the
+same algorithm in Apps Script. If the formula column ever returns an error, the
+loop falls back to the script for that pass and records an Event.
+
+**How it is tested.** `hack/test-formula-scheduler.js` checks that `scheduleScript()`
+and `hack/formula-port.js` — a line-by-line port of the formula — produce exactly
+the placements of the on-prem `schedule()` on the scheduling cases of its
+`tests/test_scheduler.py`, agree with each other on 2,000 random clusters, and
+reproduce two scenarios whose `chosen` column was computed by Google Sheets itself.
+The local apiserver uses the same port to evaluate the formula, so
+`hack/local-apiserver.js` runs in `formula` mode too.
+
+**Verify it in your own Sheet.** After `setup()`, run `simulate()` from the Apps
+Script editor and look at the Pods tab: the `chosen` column holds the formula
+(click a cell to read it) and matches the `node` column for every live pod. Then
+set `schedulable` of `node-a` to `FALSE`, add `disk=ssd` to `node-b`'s `labels`,
+give a Deployment `node_selector = disk=ssd`, run `reconcile()`, and watch the new
+pods land on `node-b`. `schedulerFormula()` returns the formula text if you want to
+paste it somewhere else.
+
 ## The lab
 
 Pre-baked things to deploy and watch (open the Sheet side-by-side):
@@ -179,7 +228,9 @@ You don't need Google to test the orchestration path.
 with a mocked Sheet:
 
 ```bash
-node hack/test.js     # asserts scheduling, scale, overcommit, node-failure eviction
+node hack/test.js                     # scheduling, scale, overcommit, node-failure eviction
+SCHEDULER=script node hack/test.js    # the same suite on the Apps Script scheduler
+node hack/test-formula-scheduler.js   # formula scheduler == script scheduler == on-prem schedule()
 ```
 
 **Full end-to-end with real containers, no Google** — `hack/local-apiserver.js`
@@ -221,6 +272,7 @@ recording.
 | `skctl apply <file.json>` | create/update deployments (our `kubectl apply -f`) |
 | `skctl scale <deployment> <n>` | change replicas |
 | `skctl delete <deployment>` | remove a deployment |
+| `skctl cordon\|uncordon <node>` | stop / resume placing new pods on a node |
 | `skctl tour` | guided demo |
 
 **apiserver** (Apps Script Web App, HTTP)
@@ -228,8 +280,10 @@ recording.
 - `GET  ?token=&kind=pods|nodes|deployments|events` — read state
 - `POST {action:"heartbeat", node, ip, cpu_total, pods:[…]}` — kubelet sync
 - `POST {action:"apply|scale|delete", …}` — control ops
+- `POST {action:"cordon|uncordon", name}` — node scheduling
 
-**Apps Script functions** (run from the editor): `setup()`, `reconcile()`,
+**Apps Script functions** (run from the editor): `setup()`, `ensureTabs()` (upgrade
+an older sheet's columns), `reconcile()`, `schedulerFormula()`,
 `simulate()`, `simulateNodeFailure()`.
 
 **On the host, a kubelet issues plain Docker:** `docker ps`, `docker run -d`,

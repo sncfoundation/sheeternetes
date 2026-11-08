@@ -7,6 +7,21 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 ## [Unreleased]
 
 ### Added
+- **The scheduler is a spreadsheet formula.** `setup()` installs a formula into a new
+  `chosen` column of the Pods tab; the reconcile loop lets Google Sheets place every
+  pod and only reads the result. It does most-free-CPU bin-packing on CPU and memory,
+  sticky placement, cordon, `node_selector` affinity and `NoSchedule`
+  taints/tolerations. `SCHEDULER = 'script'` keeps the Apps Script implementation,
+  which is also the automatic fallback if the formula column returns an error.
+- `node_selector` / `tolerations` on Deployments and Pods, `schedulable` / `labels` /
+  `taints` on Nodes; `NODE_LABELS` / `NODE_TAINTS` for `kubelet.sh`;
+  `skctl cordon|uncordon`; `skctl get nodes` shows labels, taints and
+  `SchedulingDisabled`.
+- `hack/test-formula-scheduler.js`: the formula (via a line-by-line port) and the
+  script scheduler match the on-prem `schedule()` on its reference cases, each other on
+  2,000 random clusters, and two scenarios computed by a real Google Sheet.
+- `hack/sheet-mock.js`: one Apps Script mock shared by every harness, with formula
+  cells and recalculation.
 - **CI** (`.github/workflows/ci.yml`): runs every `hack/test*.js` control-plane test,
   `bash -n` and `shellcheck` on all shell scripts, and `jq empty` on the lab and GitOps
   manifests on every push and pull request.

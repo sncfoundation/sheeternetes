@@ -4,51 +4,14 @@
 // scheduling, scaling, overcommit protection, and node-failure eviction.
 //
 //   node hack/test.js
-const fs = require('fs');
-const path = require('path');
-const codeText = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
+const { loadControlPlane } = require('./sheet-mock');
 
-// ---- in-memory Google Sheet mock ----
-function makeSheet(h) { return { grid: [h.slice()] }; }
-function lastNonEmpty(g) {
-  for (let r = g.length; r >= 1; r--) if ((g[r-1]||[]).some(c => c!=='' && c!=null)) return r;
-  return 1;
-}
-function rangeObj(s, row, col, nr, nc) {
-  const o = {
-    clearContent() { for (let i=0;i<nr;i++){const r=row-1+i;if(!s.grid[r])s.grid[r]=[];for(let j=0;j<nc;j++)s.grid[r][col-1+j]='';} return o; },
-    setValues(v) { for (let i=0;i<v.length;i++){const r=row-1+i;if(!s.grid[r])s.grid[r]=[];for(let j=0;j<v[i].length;j++)s.grid[r][col-1+j]=v[i][j];} return o; },
-    setFontWeight() { return o; },
-  };
-  return o;
-}
-function api2(s) {
-  return {
-    getDataRange: () => ({ getValues: () => s.grid.map(r => r.slice()) }),
-    getRange: (r,c,nr,nc) => rangeObj(s,r,c,nr,nc),
-    getLastRow: () => lastNonEmpty(s.grid),
-    appendRow: (a) => { s.grid.push(a.slice()); },
-    deleteRows: (st,n) => { s.grid.splice(st-1,n); },
-    setFrozenRows: () => {},
-  };
-}
-const store = {
-  Deployments: makeSheet(['name','image','replicas','cpu_req','mem_req','command']),
-  Nodes: makeSheet(['name','ip','cpu_total','mem_total','cpu_used','mem_used','status','last_heartbeat']),
-  Pods: makeSheet(['name','deployment','node','phase','container_id','image','cpu_req','mem_req','command','node_ip','started_at','message']),
-  Events: makeSheet(['ts','kind','object','message']),
-};
-const SpreadsheetApp = { getActiveSpreadsheet: () => ({
-  getId: () => 'test', getSheetByName: (n) => api2(store[n]),
-  insertSheet: (n) => { store[n]=store[n]||makeSheet([]); return api2(store[n]); } }) };
-let uuidN = 0;
-const Utilities = { getUuid: () => (++uuidN).toString(36).split('').reverse().join('').padEnd(8,'0') };
-const LockService = { getScriptLock: () => ({ waitLock(){}, releaseLock(){} }) };
-const ContentService = { MimeType: { JSON: 'json' }, createTextOutput: (t) => ({ _t: t, setMimeType() { return this; } }) };
-const ScriptApp = { getProjectTriggers: () => [], newTrigger: () => ({ timeBased: () => ({ everyMinutes: () => ({ create(){} }) }) }) };
-
-const api = new Function('SpreadsheetApp','Utilities','LockService','ContentService','ScriptApp',
-  codeText + '\nreturn { reconcile, controlOp, doPost, readTab };')(SpreadsheetApp, Utilities, LockService, ContentService, ScriptApp);
+// SCHEDULER=script node hack/test.js runs the same suite on the Apps Script scheduler
+const api = loadControlPlane({ scheduler: process.env.SCHEDULER });
+api.ensureTabs();
+const store = {};
+Object.keys(api._store).forEach(k => { Object.defineProperty(store, k, { get: () => ({ grid: api._store[k] }) }); });
+console.log('scheduler:', process.env.SCHEDULER || api.SCHEDULER);
 
 const TOKEN = 'CHANGE_ME_super_secret';
 const heartbeat = (node, cpu) => JSON.parse(api.doPost({ postData: { contents: JSON.stringify({
