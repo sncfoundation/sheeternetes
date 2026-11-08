@@ -40,7 +40,7 @@ per minute. An idle tick reads Nodes, Deployments and Pods once and Script
 Properties once, and touches no volume. Every tick adds its duration to a per-day
 counter, and the `Runtime` tab shows ticks, trigger milliseconds, the slowest tick
 and the share of the budget used (Apps Script also counts each execution's
-start-up, which a script cannot measure, so keep a margin).
+start-up, which a script cannot measure, so keep a margin). `skctl get budget` prints it.
 
 A script Deployment runs **one** pod: if `replicas` is above 1, only the oldest
 Running pod receives events. `replicas: 0` pauses it, `replicas: 1` resumes it.

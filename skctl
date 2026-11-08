@@ -20,7 +20,7 @@
 #   skctl tour                      # guided demo
 #
 # Script pods and Sheetstor volumes (docs/script-runtime.md):
-#   skctl get scripts|volumes|secrets
+#   skctl get scripts|volumes|secrets|budget   # budget: trigger time per day vs the 90 min quota
 #   skctl volume create <name> [--ro] | ls [<name>] | put <name> <path> <file> | get <name> <path> [<file>]
 #   skctl volume rm <name> <path> | delete <name>
 #   skctl secret set <name> KEY=VALUE... (KEY=- reads the value from stdin) | ls | rm <name>
@@ -52,6 +52,7 @@ case "$cmd" in
     case "$kind" in
       scripts) api_get scripts | jq -r '["NAME","POD","REPLICAS","SCHEDULE","WEBHOOK","RESTARTS","LAST_RUN","LAST_ERROR"], (.items[]|[.name,(.pod|if . == "" then "<none>" else . end),.replicas,(.schedule|tostring|if . == "" then "<none>" else .[0:40] end),.webhook,.restarts,(.last_run|if . == "" then "<never>" else . end),(.last_error|if . == "" then "<none>" else .[0:60] end)]) | @tsv' | column -t -s $'\t'; exit ;;
       volumes) api_get volumes | jq -r '["NAME","MODE","GENERATION","FILES","SIZE","SHA256"], (.items[]|[.name,.mode,.generation,.files,.size,(.sha256|.[0:19])]) | @tsv' | column -t -s $'\t'; exit ;;
+      budget) api_get budget | jq -r '["DATE","TICKS","TRIGGER_MS","MAX_TICK_MS","USED_%"], (.items[]|[.date,.ticks,.trigger_ms,.max_tick_ms,.used_percent]), (.today|select(.)|["today (live)",.ticks,.ms,.max,((.ms/5400000*1000|round)/10)]) | @tsv' | column -t -s $'\t'; exit ;;
       secrets) api_get secrets | jq -r '["NAME","KEYS"], (.items[]|[.name,(.keys|join(","))]) | @tsv' | column -t -s $'\t'; exit ;;
     esac
     case "$kind" in
