@@ -9,12 +9,13 @@
 #
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
 [ -f "$here/.skctl.env" ] && . "$here/.skctl.env"
 export WEBAPP_URL TOKEN
 
 if [ "${1:-start}" = "stop" ]; then
   pkill -f 'kubelet.sh' 2>/dev/null || true
-  docker rm -f $(docker ps -aq --filter "label=sheeternetes=1") 2>/dev/null || true
+  docker ps -aq --filter "label=sheeternetes=1" | xargs docker rm -f >/dev/null 2>&1 || true
   echo "stopped local nodes and removed their containers"
   exit 0
 fi
