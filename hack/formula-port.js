@@ -94,4 +94,38 @@ function recalcPods(store, podFormulas) {
   });
 }
 
-module.exports = { formulaChosen, recalcPods, selectorOk, taintsOk };
+// ---- the Autoscale tab (autoscaleFormulas() in Code.gs), row by row --------------
+const TOLERANCE = 0.1;
+function autoscaleRow(row, pods) {
+  const d = S(row.deployment);
+  if (d === '') return null;
+  const running = pods.filter(p => S(p.deployment) === d && S(p.phase) === 'Running');
+  const cur = running.length;                                                              // COUNTIFS
+  const rq = running.filter(p => S(p.cpu_usage) !== '').reduce((a, p) => a + N(p.cpu_req), 0);
+  const u = rq === 0 ? '' : Math.round(running.reduce((a, p) => a + N(p.cpu_usage), 0) / rq * 100);
+  const t = N(row.target_cpu);
+  const lo = Math.max(1, N(row.min_replicas));
+  const hi = Math.max(lo, S(row.max_replicas) === '' ? lo : N(row.max_replicas));
+  const raw = (u === '' || t <= 0 || cur === 0) ? cur : (Math.abs(u / t - 1) <= TOLERANCE ? cur : Math.ceil(cur * u / t));
+  const want = Math.min(hi, Math.max(lo, raw));
+  const status = u === '' ? 'NoMetrics' : raw > hi ? 'LimitedByMax' : want > cur ? 'ScalingUp' : want < cur ? 'ScalingDown' : 'Stable';
+  return { current_replicas: cur, cpu_percent: u, desired_replicas: want, status };
+}
+
+// Recalc hook: fill the spilled columns E:H (and their header cells) of the Autoscale tab.
+function recalcAutoscale(store, formulas) {
+  const ag = store.Autoscale, pg = store.Pods;
+  if (!ag || !pg) return;
+  const ph = pg[0];
+  const pods = pg.slice(1).map(r => { const o = {}; ph.forEach((k, i) => { o[k] = r[i]; }); return o; });
+  const cols = ['current_replicas', 'cpu_percent', 'desired_replicas', 'status'];
+  const user = ['deployment', 'target_cpu', 'min_replicas', 'max_replicas'];
+  cols.forEach((c, i) => { if (formulas['1,' + (5 + i)]) ag[0][4 + i] = c; });
+  for (let r = 1; r < ag.length; r++) {
+    const row = {}; user.forEach((k, i) => { row[k] = (ag[r] || [])[i]; });
+    const out = autoscaleRow(row, pods);
+    cols.forEach((c, i) => { if (formulas['1,' + (5 + i)]) ag[r][4 + i] = out ? out[c] : ''; });
+  }
+}
+
+module.exports = { formulaChosen, recalcPods, recalcAutoscale, autoscaleRow, selectorOk, taintsOk };

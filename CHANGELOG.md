@@ -32,6 +32,14 @@ however many zeroes we feel like, because the spreadsheet is eternal.
   Sheet, with server-side Tables, selectors, patches, protobuf bodies and polling
   watches, so real `kubectl` can get, describe, create, scale, log, watch, cordon and
   delete. Tested in CI with a real `kubectl` and with client-go.
+- **HPA via a formula and conditional formatting** (#11): an Autoscale tab whose
+  formula columns compute `current_replicas`, `cpu_percent`, `desired_replicas`
+  (Kubernetes HPA rule with 10% tolerance, clamped to min/max) and `status`;
+  conditional formatting colours each row (red = wants more than max). The reconcile
+  loop applies `desired_replicas` with a 2-minute scale-down stabilization window.
+  `skctl autoscale` / `skctl get hpa`, `lab/autoscale.json`.
+- `kubelet.sh` reports `docker stats` per pod; new Pods columns `cpu_usage`
+  (millicores) and `mem_usage` (MiB).
 - **Disaster recovery from Google Sheets version history** (#12): `skctl revisions`
   and `skctl restore --revision <id> | --at <time> [--tabs …] [--dry-run]`. Code.gs
   exports the revision through the Drive advanced service, converts it into a
@@ -51,6 +59,9 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 - **CI** (`.github/workflows/ci.yml`): runs every `hack/test*.js` control-plane test,
   `bash -n` and `shellcheck` on all shell scripts, and `jq empty` on the lab and GitOps
   manifests on every push and pull request.
+
+### Changed
+- `skctl`: `WEBAPP_URL` / `TOKEN` from the environment now win over `.skctl.env`.
 
 ### Fixed
 - README certification and verification links now point at the foundation site

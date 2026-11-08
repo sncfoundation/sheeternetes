@@ -98,3 +98,13 @@ jobs:
         run: hack/e2e-kube-facade.sh
       - name: real kubelet.sh + Docker
         run: KUBELET=docker APORT=8791 FPORT=6451 hack/e2e-kube-facade.sh
+
+  e2e-autoscale:
+    name: E2E — autoscaling from docker stats and a formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: hack/e2e-autoscale.sh

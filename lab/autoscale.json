@@ -1,0 +1,6 @@
+{
+  "deployments": [
+    { "name": "burner", "image": "busybox:1.36", "replicas": 1, "cpu_req": 200, "mem_req": 32,
+      "command": "while true; do :; done" }
+  ]
+}

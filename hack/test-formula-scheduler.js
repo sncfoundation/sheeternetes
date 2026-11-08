@@ -137,7 +137,8 @@ const live = api.readTab('Pods').length;
 check('Pods tab has a `chosen` header after the data columns', col === api.TABS.Pods.length + 1, header);
 check('one formula per Pods row', rowsWithFormula === live && live === 3, { rowsWithFormula, live });
 const f = api.schedulerFormula();
-check('formula reads cpu_req (G) and chosen (O) columns', f.includes('$G$2:INDEX($G:$G,ROW()-1)') && f.includes('$O$2:INDEX($O:$O,ROW()-1)'), f.slice(0, 200));
+const L = String.fromCharCode(64 + col);  // the chosen column's letter (< 27 columns)
+check(`formula reads cpu_req (G) and chosen (${L}) columns`, f.includes('$G$2:INDEX($G:$G,ROW()-1)') && f.includes(`$${L}$2:INDEX($${L}:$${L},ROW()-1)`), f.slice(0, 200));
 const ev = api.readTab('Events').map(e => e.message);
 check('pods were placed by the formula', ev.filter(m => /\(formula\)$/.test(m)).length === 3, ev);
 api.controlOp({ token: TOKEN, action: 'cordon', name: 'node-a' });
