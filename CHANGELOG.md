@@ -4,6 +4,38 @@ All notable changes to Sheeternetes are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning is based on
 however many zeroes we feel like, because the spreadsheet is eternal.
 
+## [v0.0.0.0.0.3] — "Save As…" — 2026-11-08
+
+The project moved out of a personal account into its own foundation, and the repo
+became product-only. Same spreadsheet, new file name.
+
+### Added
+- **SheetHub** — a GitLab-style DevOps forge whose data plane is a spreadsheet, linked from
+  the README ecosystem table and the roadmap. It lives in
+  [`sncfoundation/sheethub`](https://github.com/sncfoundation/sheethub) and hosts the
+  manifests Sheetlux CD deploys, so the stack self-hosts on spreadsheets (#35, #55).
+- Project logo in the README header.
+- Roadmap **Recently shipped** section, with statuses flipped for delivered items
+  (SNCF org split, per-project repos, SheetHub, skctl-wasm, Sheetlium/Sheetlux
+  extraction, language clients).
+- Expanded roadmap: AI, WebAssembly, storage, OS, clients, components, and SheetHub.
+
+### Changed
+- The repository moved to the **Sheet-Native Computing Foundation** org: all URLs now
+  point at `github.com/sncfoundation/sheeternetes` and `sncfoundation.github.io`.
+- The repo is now **product-only** (`Code.gs`, `kubelet.sh`, `skctl`, the lab, GitOps).
+  The website, the CSFE registry, and the certification workflow moved to
+  [`sncfoundation.github.io`](https://github.com/sncfoundation/sncfoundation.github.io);
+  `docs/` is a redirect stub to the foundation site.
+
+### Fixed
+- Broken social-card image in the README after the site move.
+- Broken landscape link in the roadmap.
+
+### Removed
+- `docs/` site pages, `docs/registry/`, and the certification issue form and Action
+  (now maintained in the foundation site repo).
+
 ## [v0.0.0.0.0.2] — "The Registry" — 2026-08-31
 
 ### Added

@@ -6,7 +6,7 @@
 
 Every item below has a **tracking issue**. Most are tagged
 [`good first issue`](https://github.com/sncfoundation/sheeternetes/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
-Pick one, open a PR, and earn a place in the [SNCF Landscape](https://sncfoundation.github.io/sheeternetes/landscape.html).
+Pick one, open a PR, and earn a place in the [SNCF Landscape](https://sncfoundation.github.io/landscape.html).
 Contributions reconcile.
 
 Status legend: 🟢 shipped · 🟡 in progress · ⚪ planned · 💭 idea
@@ -20,6 +20,10 @@ Delivered since this roadmap was written — some were "ideas" above, some are n
 - **SICF — the Sheet Container Initiative** — an on-sheet OCI image format (layers as sha256-addressed base64 cells) with a `sheetbuild` round-trip tool, load-tested; plus a container registry merged into SheetHub.
 - **SheetsOperator** — a canonical operator for Google Sheets (control plane → controller → self-healing managed sheets).
 - **wasmlet** — a sheet-native WASM/WASI runtime (see SheetAssembly #24).
+- **SheetGate** — an Ingress / Gateway API analog: `Gateways` and `Routes` tabs drive a generated, validated, hot-reloaded nginx gateway, plus published container ports (a NodePort analog). In `sheeternetes-onprem` ([#56](https://github.com/sncfoundation/sheeternetes/issues/56)).
+- **Pluggable storage backends** — the on-prem apiserver runs on Excel, LibreOffice Calc, or plain CSVs as well as Google Sheets ([#60](https://github.com/sncfoundation/sheeternetes/issues/60)).
+- **Sheetelligence**, **SheetAIOps**, and **SheetFinOps** CLIs — plain-English intents to manifests, ranked incidents from the Events tab, and an itemized $0 bill.
+- **Sheeternetes v0.0.0.0.0.3 "Save As…"** — the product repo under the SNCF org, with SheetHub linked as the stack's forge.
 
 ## Flagship
 
@@ -60,11 +64,13 @@ biggest gap in the stack — storage.
 
 ## AI
 
-### 💭 Sheetelligence — prompt-native orchestration · [#22](https://github.com/sncfoundation/sheeternetes/issues/22)
+### 🟢 Sheetelligence — prompt-native orchestration · [#22](https://github.com/sncfoundation/sheeternetes/issues/22)
 Describe a workload in plain English in a cell; an LLM fills in the manifest rows.
+Implemented in [`sncfoundation/sheetelligence`](https://github.com/sncfoundation/sheetelligence).
 
-### 💭 SheetAIOps — anomaly detection · [#23](https://github.com/sncfoundation/sheeternetes/issues/23)
+### 🟢 SheetAIOps — anomaly detection · [#23](https://github.com/sncfoundation/sheeternetes/issues/23)
 Watch the Events tab; predict failures with total confidence and no accountability.
+Implemented in [`sncfoundation/sheetaiops`](https://github.com/sncfoundation/sheetaiops).
 
 ## WebAssembly
 
