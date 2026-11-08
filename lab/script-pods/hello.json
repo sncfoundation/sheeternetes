@@ -1,0 +1,13 @@
+{
+  "deployments": [
+    {
+      "name": "hello",
+      "runtime": "script",
+      "image": "sheetstor://code/hello.js",
+      "replicas": 1,
+      "schedule": "*/2 * * * *",
+      "env": "{\"GREETING\": \"hello, from a cell\"}",
+      "volumes": "media:ro"
+    }
+  ]
+}

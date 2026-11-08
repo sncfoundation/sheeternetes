@@ -645,6 +645,10 @@ function runtimeGet(p) {
   if (p.kind === 'secrets') {
     return { items: runtimeSecretNames().map(n => ({ name: n, keys: Object.keys(runtimePropJSON(RUNTIME_PROP.secret + n, {})).sort() })) };
   }
+  if (p.kind === 'budget') {
+    const today = runtimePropJSON(RUNTIME_PROP.quota + new Date().toISOString().slice(0, 10), null);
+    return { items: readTab(RUNTIME_QUOTA_TAB), today: today, budget_ms: RUNTIME_QUOTA_MS };
+  }
   if (p.kind === 'scripts') {
     const pods = readTab('Pods');
     const mask = runtimeMasker();

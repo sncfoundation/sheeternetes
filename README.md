@@ -86,6 +86,10 @@ that node should be running. The node converges. That's the whole system.
 - **Logs** — the last lines of every running pod, shipped by the kubelets (`kubectl logs`)
 - **Autoscale** — *you edit the first four columns*; formulas compute the desired replicas (the HPA)
 
+With script pods (below) a few more appear: **Volumes** (the Sheetstor registry), a
+hidden `sheetstor-<volume>` tab per volume, hidden `table-<deployment>-<name>` tabs,
+and **Runtime** (trigger time per day).
+
 ## Prerequisites
 
 You do not need Kubernetes, etcd, a cluster, or a platform team. You need:
@@ -340,6 +344,59 @@ of the formulas in `hack/formula-port.js`. CI's `hack/e2e-autoscale.sh` runs it
 with real containers: `kubelet.sh` reports `docker stats` and the busy loop is
 scaled to max.
 
+## Script pods: no Docker, no kubelet, no computer
+
+The last piece of infrastructure Sheeternetes needed was somebody else's computer.
+Not any more. A Deployment with `runtime: script` is a JavaScript module stored in
+the spreadsheet and executed by the cluster's own Apps Script project. The control
+plane is a Sheet, the storage is a Sheet, and the compute is the Sheet's script.
+
+```json
+{ "deployments": [{
+    "name": "hello", "runtime": "script", "image": "sheetstor://code/hello.js",
+    "replicas": 1, "schedule": "*/2 * * * *",
+    "env": "{\"GREETING\": \"hello, from a cell\"}", "volumes": "media:ro" }] }
+```
+
+```js
+exports.handle = function (event, env) {          // schedule | webhook | run
+  const s = env.state.get();
+  if (event.type === 'webhook') env.once('hook:' + event.json.id, () => { s.hooks = (s.hooks || 0) + 1; });
+  return s;
+};
+```
+
+- **It is a node.** `setup()` registers the project as the node `apps-script` with
+  the label and `NoSchedule` taint `runtime=script`; the formula scheduler places
+  script pods there and Docker pods never. Replicas, rolling updates, `scale 0`
+  (pause) and Events work unchanged.
+- **Events:** cron `schedule` slots (fired exactly once, even when triggers jitter or
+  overlap), webhooks at `<exec URL>?pod=<deployment>&key=…` (HTTP 200 through
+  `HtmlService`; a 302 when the sender should redeliver), and
+  `skctl run <deployment> -- <fn> <args>`.
+- **Exactly one invocation at a time**, each a transaction on the pod's state
+  document; crashes roll back, count restarts and back off (`CrashLoopBackOff`).
+- **Sheetstor on cells:** volumes are tabs of base64 chunks under the 50,000-character
+  cell limit, sha256-verified, written copy-on-write with an atomic pointer flip;
+  `ro` volumes for media. Pod code lives on a volume too.
+- **Secrets** live in Script Properties, never in a cell, and are masked out of logs,
+  Events and API answers.
+- **Append-only tables** for bursty data, `env.sleepUntil` for idle minutes that cost
+  nothing, and a `Runtime` tab that shows how much of the 90-minute daily trigger
+  budget is used.
+
+```bash
+skctl volume create code && skctl volume put code hello.js lab/script-pods/hello.js
+skctl volume create media --ro && skctl volume put media pixel.gif lab/script-pods/pixel.gif
+skctl apply lab/script-pods/hello.json
+skctl get scripts
+skctl run hello -- pixel
+curl -sL -X POST "$(skctl webhook hello)" -d '{"id": 1}'
+skctl logs hello
+```
+
+The whole model, its guarantees and its limits: [docs/script-runtime.md](docs/script-runtime.md).
+
 ## Disaster recovery: RPO measured in Ctrl+Z
 
 Other orchestrators make you install Velero, configure object storage and rehearse
@@ -412,6 +469,8 @@ with a mocked Sheet:
 node hack/test.js                     # scheduling, scale, overcommit, node-failure eviction
 SCHEDULER=script node hack/test.js    # the same suite on the Apps Script scheduler
 node hack/test-formula-scheduler.js   # formula scheduler == script scheduler == on-prem schedule()
+node hack/test-sheetstor.js           # volumes in cells: chunks, sha256, crash-safe generations
+node hack/test-runtime.js             # script pods: slots, webhooks, runs, secrets, backoff, budget
 ```
 
 **Full end-to-end with real containers, no Google** — `hack/local-apiserver.js`
@@ -466,6 +525,12 @@ recording.
 | `skctl revisions` | list the Sheet's version history |
 | `skctl restore --revision <id> \| --at <time> [--tabs …] [--dry-run]` | roll the desired state back |
 | `skctl tour` | guided demo |
+| `skctl get scripts\|volumes\|secrets` | script pods, Sheetstor volumes, secret names |
+| `skctl volume create <name> [--ro]` / `ls [<name>]` / `put <name> <path> <file>` / `get <name> <path> [<file>]` / `rm <name> <path>` / `delete <name>` | Sheetstor volumes in cells |
+| `skctl secret set <name> KEY=VALUE…` (`KEY=-` reads stdin) / `ls` / `rm <name>` | secrets in Script Properties |
+| `skctl run <deployment> [-- <fn> <args…>]` | a one-off invocation of a script pod |
+| `skctl logs <pod\|deployment> [--previous]` | a pod's log (or the one before its last crash) |
+| `skctl webhook <deployment> [--rotate]` | the webhook URL of a script pod |
 
 **apiserver** (Apps Script Web App, HTTP)
 
@@ -475,6 +540,9 @@ recording.
 - `POST {action:"cordon|uncordon", name}` — node scheduling
 - `GET ?token=&kind=revisions` — Drive version history
 - `POST {action:"restore", revision|at, tabs?, dryRun?}` — roll tabs back to a revision
+- `POST {action:"volumeCreate|volumePut|volumeGet|volumeRm|volumeDelete", …}`, `GET ?kind=volumes|files` — Sheetstor
+- `POST {action:"run|secretSet|secretDelete|webhook", …}`, `GET ?kind=scripts|secrets` — script pods
+- `POST ?pod=<deployment>&key=<key>` — a script pod's webhook (any body)
 
 **Apps Script functions** (run from the editor): `setup()`, `ensureTabs()` (upgrade
 an older sheet's columns), `reconcile()`, `schedulerFormula()`, `listRevisions()`,
@@ -524,7 +592,8 @@ hard 95%.
 *Cheap wins still on the table:*
 
 - **Rollback** — keep the previous image and revert a bad roll.
-- **ConfigMap / Secret** — env and config injection.
+- **ConfigMap / Secret** — env and config injection for Docker pods (script pods
+  have both: an `env` column and Secrets in Script Properties).
 - **Hard limits & rebalancing** — placement now honors CPU *and* memory requests,
   but we don't enforce limits beyond Docker's `--cpus`/`--memory`, and a pod placed
   early never moves until its node dies.
@@ -533,7 +602,8 @@ hard 95%.
 
 - **Multi-host networking** — Sheetlium gives Services + DNS on a single Docker
   daemon; spanning real hosts needs an overlay network we don't have yet.
-- **Storage** — no volumes, PV/PVC, stateful data.
+- **Storage** — Sheetstor volumes live in cells for script pods; Docker pods still
+  have no PV/PVC.
 - **Ingress** — no external traffic routing.
 - **Multi-tenancy** — no namespaces, no RBAC (a single shared token).
 - **Consistency** — Google Sheets is not a quorum store: API quotas, no
