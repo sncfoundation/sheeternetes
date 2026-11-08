@@ -1,0 +1,94 @@
+# Sheeternetes Virtual Kubelet: registers a spreadsheet as the Node "sheet".
+#
+#   kubectl create namespace sheeternetes
+#   kubectl -n sheeternetes create secret generic sheeternetes-sheet \
+#     --from-literal=url=https://script.google.com/macros/s/XXXX/exec \
+#     --from-literal=token=CHANGE_ME_super_secret
+#   kubectl apply -f virtual-kubelet/deploy/sheeternetes-vk.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sheeternetes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sheeternetes-vk
+  namespace: sheeternetes
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sheeternetes-vk
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [nodes/status]
+    verbs: [update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [update, patch]
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch, update]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sheeternetes-vk
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sheeternetes-vk
+subjects:
+  - kind: ServiceAccount
+    name: sheeternetes-vk
+    namespace: sheeternetes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sheeternetes-vk
+  namespace: sheeternetes
+  labels: {app: sheeternetes-vk}
+spec:
+  replicas: 1          # one virtual node per spreadsheet; never run two
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: sheeternetes-vk}
+  template:
+    metadata:
+      labels: {app: sheeternetes-vk}
+    spec:
+      serviceAccountName: sheeternetes-vk
+      containers:
+        - name: vk
+          image: ghcr.io/sncfoundation/sheeternetes-vk:latest
+          args: [--nodename=sheet]
+          env:
+            - name: SHEET_URL
+              valueFrom: {secretKeyRef: {name: sheeternetes-sheet, key: url}}
+            - name: SHEET_TOKEN
+              valueFrom: {secretKeyRef: {name: sheeternetes-sheet, key: token}}
+            - name: VK_INTERNAL_IP   # the apiserver reaches the kubelet API (logs) here
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports:
+            - {name: kubelet-api, containerPort: 10250}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

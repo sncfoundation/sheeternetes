@@ -77,12 +77,13 @@ The control loop is **heartbeat-driven**: each kubelet reports the containers it
 runs, the apiserver runs a reconcile, and answers with the exact set of pods
 that node should be running. The node converges. That's the whole system.
 
-## The Sheet (four tabs)
+## The Sheet (five tabs)
 
 - **Deployments** — *you edit this.* `name, image, replicas, cpu_req (millicores), mem_req (MiB), command, node_selector, tolerations`
 - **Nodes** — written by kubelets: capacity, usage, `status`, `last_heartbeat`; you may edit `schedulable` (cordon), `labels`, `taints`
 - **Pods** — written by the control loop: `phase` (Pending → Scheduled → Running → Terminating → Deleted), which node, container id — plus the `chosen` column, where a formula schedules every pod
 - **Events** — an audit log of scheduling / scaling / eviction decisions
+- **Logs** — the last lines of every running pod, shipped by the kubelets (`kubectl logs`)
 
 ## Prerequisites
 
@@ -198,6 +199,61 @@ give a Deployment `node_selector = disk=ssd`, run `reconcile()`, and watch the n
 pods land on `node-b`. `schedulerFormula()` returns the formula text if you want to
 paste it somewhere else.
 
+## Run your pods in a spreadsheet from any Kubernetes cluster (incl. Cozystack)
+
+For organisations that have already invested in Kubernetes, Sheeternetes offers a
+migration path that requires no migration: the **Sheeternetes Virtual Kubelet**
+registers a whole spreadsheet as one Node of your existing cluster. Pods that
+choose it are written into the Deployments tab, placed by the formula scheduler
+onto a `kubelet.sh` host, and reported back as ordinary Pods — status, IP and
+`kubectl logs` included.
+
+```
+kubectl get nodes
+NAME            STATUS   ROLES    AGE   VERSION
+sheet           Ready    agent    1m    v0.0.0.0.0.4-sheeternetes
+```
+
+Install it into the cluster (it runs as one Deployment and needs only the Web App
+URL and token of your Sheet):
+
+```bash
+kubectl create namespace sheeternetes
+kubectl -n sheeternetes create secret generic sheeternetes-sheet \
+  --from-literal=url=https://script.google.com/macros/s/XXXX/exec \
+  --from-literal=token=your-secret
+kubectl apply -f virtual-kubelet/deploy/sheeternetes-vk.yaml
+kubectl apply -f virtual-kubelet/examples/hello-pod.yaml   # selects the sheet
+kubectl logs hello-sheet                                    # hello from a spreadsheet
+```
+
+A pod opts in with `nodeSelector: {sheeternetes.io/sheet: "true"}` and a toleration
+for the `sheeternetes.io/sheet` NoSchedule taint, so nothing lands in the
+spreadsheet by accident. On **Cozystack**, a tenant Kubernetes cluster is a regular
+Kubernetes cluster: download its kubeconfig from the dashboard and run the same
+commands against it — the spreadsheet joins the tenant as one more node.
+
+How a Pod maps onto the Sheet: one Pod = one Deployments row
+`<namespace>.<name>` with `replicas: 1`; the single container's image, its
+`command` + `args` (shell-quoted for the kubelet's `sh -c`) and its CPU/memory
+requests (limits as fallback; defaults 100m / 64Mi) are copied over. Pod IP is the
+IP of the `kubelet.sh` host. `kubectl logs` returns the last `LOG_TAIL` (default 20)
+lines that each `kubelet.sh` ships on every heartbeat into the new **Logs** tab.
+Not supported: multi-container pods (rejected), env/volumes/probes (ignored),
+`exec`, `attach`, `port-forward`.
+
+The image is `ghcr.io/sncfoundation/sheeternetes-vk` (built from
+`virtual-kubelet/Dockerfile`; build it yourself with
+`docker build -f virtual-kubelet/Dockerfile .`). The flags of the binary:
+`--nodename`, `--sheet-url`/`SHEET_URL`, `--sheet-token`/`SHEET_TOKEN`,
+`--internal-ip`/`VK_INTERNAL_IP`, `--listen`, `--tls-cert`/`--tls-key` (default: a
+self-signed serving certificate), `--kubeconfig`.
+
+CI proves it end to end on every pull request (`hack/e2e-virtual-kubelet.sh`): a
+kind cluster runs the Virtual Kubelet against `hack/local-apiserver.js` with a real
+`kubelet.sh` and Docker, a Pod reaches Running, `kubectl logs` shows its output,
+and `kubectl delete` removes the container.
+
 ## The lab
 
 Pre-baked things to deploy and watch (open the Sheet side-by-side):
@@ -256,6 +312,13 @@ docker rm -f $(docker ps -q --filter label=sheeternetes.node=node-c)
 The kubelets are byte-for-byte identical against the local shim and against a
 real Sheet — only `WEBAPP_URL` changes.
 
+**Go side** — the Virtual Kubelet provider is tested against the same local
+apiserver (Node.js is required):
+
+```bash
+go test ./...
+```
+
 **Visual proof in the Sheet** — with `Code.gs` deployed, run `simulate()` from the
 Apps Script editor: it registers three fake nodes, runs the real scheduler, and
 drives pods to Running so the Sheet fills live. `simulateNodeFailure()` ages a
@@ -277,7 +340,7 @@ recording.
 
 **apiserver** (Apps Script Web App, HTTP)
 
-- `GET  ?token=&kind=pods|nodes|deployments|events` — read state
+- `GET  ?token=&kind=pods|nodes|deployments|events|logs[&name=]` — read state
 - `POST {action:"heartbeat", node, ip, cpu_total, pods:[…]}` — kubelet sync
 - `POST {action:"apply|scale|delete", …}` — control ops
 - `POST {action:"cordon|uncordon", name}` — node scheduling

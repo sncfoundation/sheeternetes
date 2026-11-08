@@ -30,7 +30,10 @@ const TABS = {
   Nodes:       ['name', 'ip', 'cpu_total', 'mem_total', 'cpu_used', 'mem_used', 'status', 'last_heartbeat', 'schedulable', 'labels', 'taints'],
   Pods:        ['name', 'deployment', 'node', 'phase', 'container_id', 'image', 'cpu_req', 'mem_req', 'command', 'node_ip', 'started_at', 'message', 'node_selector', 'tolerations'],
   Events:      ['ts', 'kind', 'object', 'message'],
+  Logs:        ['name', 'node', 'updated_at', 'tail'],
 };
+// A cell holds at most 50,000 characters; keep log tails well below that.
+const LOG_TAIL_MAX_CHARS = 20000;
 // The scheduler formula lives in the column right after the Pods data columns.
 // writeTab() never writes it, so the formulas survive every reconcile.
 const CHOSEN_HEADER = 'chosen';
@@ -43,6 +46,7 @@ function ss() { return SpreadsheetApp.getActiveSpreadsheet(); }
 
 function readTab(name) {
   const sh = ss().getSheetByName(name);
+  if (!sh) return [];                       // a tab added in a newer version; ensureTabs() creates it
   const rng = sh.getDataRange().getValues();
   const header = rng.shift();
   return rng
@@ -55,6 +59,7 @@ function readTab(name) {
 }
 
 function writeTab(name, objects) {
+  if (!ss().getSheetByName(name)) ensureTabs();
   const sh = ss().getSheetByName(name);
   const header = TABS[name];
   const rows = objects.map(o => header.map(h => (o[h] === undefined || o[h] === null) ? '' : o[h]));
@@ -360,10 +365,12 @@ function doGet(e) {
   const p = e.parameter || {};
   if (p.token !== TOKEN) return json({ error: 'unauthorized' });
   const kind = (p.kind || 'pods').toLowerCase();
-  const map = { pods: 'Pods', nodes: 'Nodes', deployments: 'Deployments', events: 'Events' };
+  const map = { pods: 'Pods', nodes: 'Nodes', deployments: 'Deployments', events: 'Events', logs: 'Logs' };
   const tab = map[kind];
   if (!tab) return json({ error: 'unknown kind ' + kind });
-  return json({ items: readTab(tab) });
+  let items = readTab(tab);
+  if (p.name) items = items.filter(o => String(o.name) === String(p.name));
+  return json({ items: items });
 }
 
 function doPost(e) {
@@ -421,6 +428,21 @@ function doPost(e) {
         }
       });
       writeTab('Pods', pods);
+    }
+
+    // log tails the agent shipped (the `kubectl logs` of a spreadsheet)
+    const tails = (body.pods || []).filter(r => typeof r.logs === 'string');
+    if (tails.length) {
+      const logs = readTab('Logs');
+      const live = {};
+      readTab('Pods').forEach(p => { live[p.name] = true; });
+      const byName = {};
+      logs.filter(l => live[l.name]).forEach(l => { byName[l.name] = l; });
+      tails.forEach(r => {
+        byName[r.name] = { name: r.name, node: body.node, updated_at: new Date().toISOString(),
+                           tail: r.logs.slice(-LOG_TAIL_MAX_CHARS) };
+      });
+      writeTab('Logs', Object.keys(byName).map(k => byName[k]));
     }
   } finally {
     lock.releaseLock();

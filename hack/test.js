@@ -90,5 +90,19 @@ var bm = pods().find(p => p.deployment==='bigmem');
 check('memory-heavy pod is left Unschedulable (not OOM-scheduled)', bm && !bm.node, bm && bm.node);
 check('unschedulable message mentions memory', bm && /memory/i.test(bm.message||''), bm && bm.message);
 
+console.log('\n== H: kubelet ships log tails, apiserver serves them ==');
+{
+  const p0 = pods().find(p => p.phase === 'Running' || p.phase === 'Scheduled');
+  api.doPost({ postData: { contents: JSON.stringify({ token: TOKEN, node: p0.node, ip: '10.0.0.1',
+    cpu_total: 2000, mem_total: 2048, pods: [{ name: p0.name, phase: 'Running', container_id: 'c1', logs: 'hello\nfrom a cell\n' }] }) } });
+  const got = JSON.parse(api.doGet({ parameter: { token: TOKEN, kind: 'logs', name: p0.name } })._t);
+  check('logs tab returns the tail for the pod', got.items.length === 1 && got.items[0].tail === 'hello\nfrom a cell\n', got);
+  const big = 'x'.repeat(60000);
+  api.doPost({ postData: { contents: JSON.stringify({ token: TOKEN, node: p0.node, ip: '10.0.0.1',
+    cpu_total: 2000, mem_total: 2048, pods: [{ name: p0.name, phase: 'Running', container_id: 'c1', logs: big }] }) } });
+  const got2 = JSON.parse(api.doGet({ parameter: { token: TOKEN, kind: 'logs', name: p0.name } })._t);
+  check('log tail is capped below the 50,000-char cell limit', got2.items[0].tail.length === 20000, got2.items[0].tail.length);
+}
+
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail?1:0);
