@@ -40,6 +40,10 @@ const CHOSEN_HEADER = 'chosen';
 const CHOSEN_COL = TABS.Pods.length + 1;
 const DEPLOYMENT_SPEC = ['image', 'replicas', 'cpu_req', 'mem_req', 'command', 'node_selector', 'tolerations'];
 const POD_SPEC = ['image', 'command', 'cpu_req', 'mem_req', 'node_selector', 'tolerations'];
+// Script pods (Runtime.gs): their Deployment columns, and the log of the previous run
+TABS.Deployments.push('runtime', 'schedule', 'env', 'secrets', 'volumes');
+DEPLOYMENT_SPEC.push('runtime', 'schedule', 'env', 'secrets', 'volumes');
+TABS.Logs.push('previous');
 
 // ---------- generic sheet <-> objects ----------
 function ss() { return SpreadsheetApp.getActiveSpreadsheet(); }
@@ -385,10 +389,13 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  // a script pod's webhook (Runtime.gs): ?pod=<deployment>&key=<webhook key>
+  if (e.parameter && e.parameter.pod && typeof runtimeWebhook === 'function') return runtimeWebhook(e);
   let body;
   try { body = JSON.parse(e.postData.contents); }
   catch (err) { return json({ error: 'bad json' }); }
   if (body.token !== TOKEN) return json({ error: 'unauthorized' });
+  if (typeof runtimeWake === 'function') runtimeWake();   // any change may give the minute tick work
 
   // kubectl-style control operations (from skctl / the lab)
   if (body.action === 'restore') return restoreOp(body);
@@ -502,10 +509,12 @@ function controlOp(body) {
                        cpu_req: spec.cpu_req || 100, mem_req: spec.mem_req || 64,
                        command: spec.command || '',
                        node_selector: spec.node_selector || '', tolerations: spec.tolerations || '' };
+          DEPLOYMENT_SPEC.forEach(k => { if (nd[k] === undefined && spec[k] !== undefined) nd[k] = spec[k]; });
           deps.push(nd); byName[spec.name] = nd;
           event('Deployment', spec.name, 'created');
         }
       });
+      if (typeof runtimeDefaults === 'function') deps.forEach(runtimeDefaults);
     } else if (body.action === 'scale') {
       const d = byName[body.name];
       if (!d) return json({ error: 'no such deployment ' + body.name });
@@ -794,7 +803,8 @@ function setup() {
     if (t.getHandlerFunction() === 'reconcile') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('reconcile').timeBased().everyMinutes(1).create();
-  if (typeof sheetstorEnsure === 'function') sheetstorEnsure();   // the Volumes registry
+  // script pods: the apps-script node, Volumes, and runtimeTick in place of the plain timer
+  if (typeof setupRuntime === 'function') setupRuntime();
   event('System', 'setup', 'Sheeternetes initialized');
 }
 

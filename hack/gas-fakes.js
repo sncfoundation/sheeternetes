@@ -21,14 +21,16 @@ function blob(bytes, contentType, name) {
   return b;
 }
 
-// Only the pattern letters the runtime uses: m H d M u (u = ISO day of week, 1 = Monday).
+// The pattern letters yyyy MM dd HH mm and m H d M u (u = ISO day of week, 1 = Monday).
 function formatDate(date, tz, pattern) {
   const parts = {};
   new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric',
     hour: 'numeric', minute: 'numeric', weekday: 'short' }).formatToParts(date).forEach(p => { parts[p.type] = p.value; });
   const dow = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[parts.weekday];
+  const two = (n) => ('0' + n).slice(-2);
   const map = { m: Number(parts.minute), H: Number(parts.hour) % 24, d: Number(parts.day), M: Number(parts.month), u: dow };
-  return pattern.replace(/[mHdMu]/g, c => String(map[c]));
+  Object.assign(map, { yyyy: parts.year, MM: two(map.M), dd: two(map.d), HH: two(map.H), mm: two(map.m) });
+  return pattern.replace(/yyyy|MM|dd|HH|mm|[mHdMu]/g, c => String(map[c]));
 }
 
 function makeFakes(opts) {
@@ -70,6 +72,13 @@ function makeFakes(opts) {
       const t = { getHandlerFunction: () => fn, minutes: n }; triggers.push(t); return t; } }) }) }),
   };
 
+  const cache = {};
+  const CacheService = { getScriptCache: () => ({
+    get: (k) => (k in cache ? cache[k] : null),
+    put: (k, v) => { cache[k] = String(v); },
+    remove: (k) => { delete cache[k]; },
+  }) };
+
   const Session = { getScriptTimeZone: () => opts.timeZone || 'Etc/UTC' };
 
   const Utilities = {
@@ -85,7 +94,7 @@ function makeFakes(opts) {
     sleep: () => {},
   };
 
-  return { PropertiesService, HtmlService, LockService, ScriptApp, Session, Utilities,
+  return { PropertiesService, HtmlService, LockService, ScriptApp, Session, Utilities, CacheService,
            _props: props, _triggers: triggers, _lock: lockState };
 }
 

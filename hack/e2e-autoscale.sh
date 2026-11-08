@@ -27,7 +27,9 @@ sk apply "$here/lab/autoscale.json" >/dev/null
 sk autoscale burner --cpu-percent 50 --min 1 --max 3 >/dev/null
 for i in $(seq 60); do
   replicas="$(curl -fs "$WEBAPP_URL?token=$TOKEN&kind=deployments" | jq -r '.items[] | select(.name=="burner") | .replicas')"
-  [ "$replicas" = 3 ] && break
+  # the status turns LimitedByMax only once the new replicas run and report usage
+  status="$(curl -fs "$WEBAPP_URL?token=$TOKEN&kind=autoscale" | jq -r '.items[] | select(.deployment=="burner") | .status')"
+  [ "$replicas" = 3 ] && [ "$status" = LimitedByMax ] && break
   [ $((i % 5)) = 0 ] && sk get hpa
   sleep 3
 done
