@@ -4,6 +4,18 @@ All notable changes to Sheeternetes are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning is based on
 however many zeroes we feel like, because the spreadsheet is eternal.
 
+## [Unreleased]
+
+### Added
+- **CI** (`.github/workflows/ci.yml`): runs every `hack/test*.js` control-plane test,
+  `bash -n` and `shellcheck` on all shell scripts, and `jq empty` on the lab and GitOps
+  manifests on every push and pull request.
+
+### Fixed
+- README certification and verification links now point at the foundation site
+  (`certification.html`, `verify.html`) instead of the retired `/sheeternetes/` paths.
+- `local-cluster.sh stop` no longer word-splits the container list (shellcheck SC2046).
+
 ## [v0.0.0.0.0.3] — "Save As…" — 2026-11-08
 
 The project moved out of a personal account into its own foundation, and the repo

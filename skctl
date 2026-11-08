@@ -16,6 +16,7 @@
 #
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
 [ -f "$here/.skctl.env" ] && . "$here/.skctl.env"
 WEBAPP_URL="${WEBAPP_URL:?set WEBAPP_URL (Apps Script /exec URL)}"
 TOKEN="${TOKEN:-CHANGE_ME_super_secret}"
