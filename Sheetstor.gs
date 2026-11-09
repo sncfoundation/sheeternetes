@@ -324,14 +324,15 @@ function sheetstorRead(name, path) { return skLocked(() => sheetstorRead_(name, 
 function sheetstorList(name) { return skLocked(() => sheetstorList_(name)); }
 function sheetstorRemove(name, path, opts) { return skLocked(() => sheetstorWrite_(name, path, null, Object.assign({}, opts, { tombstone: true }))); }
 
-// What a pod sees as env.volumes.<name>. The caller holds the lock.
+// What a pod sees as env.volumes.<name>. The caller holds the lock. The registry is
+// looked up on first use, so an invocation that never touches the volume reads nothing.
 function sheetstorHandle_(name, readOnly) {
-  const vol = sheetstorVolume_(name);
-  const ro = readOnly || vol.mode === 'ro';
-  const guard = () => { if (ro) throw new Error('volume ' + name + ' is mounted read-only'); };
+  let ro = null;
+  const isRo = () => (ro === null ? (ro = !!readOnly || sheetstorVolume_(name).mode === 'ro') : ro);
+  const guard = () => { if (isRo()) throw new Error('volume ' + name + ' is mounted read-only'); };
   const h = {
     name: name,
-    readOnly: ro,
+    get readOnly() { return isRo(); },
     read: (path) => {
       const f = sheetstorRead_(name, path);
       return Utilities.newBlob(f.bytes, f.contentType, String(path).split('/').pop());

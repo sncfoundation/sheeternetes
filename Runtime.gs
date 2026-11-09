@@ -78,9 +78,9 @@ function runtimeSecretNames() {
   return runtimeProps().getKeys().filter(k => k.indexOf(RUNTIME_PROP.secret) === 0).map(k => k.slice(RUNTIME_PROP.secret.length)).sort();
 }
 
-function runtimeMasker() {
+function runtimeMasker(all) {
   const values = [];
-  const all = runtimeProps().getProperties();
+  all = all || runtimeProps().getProperties();
   Object.keys(all).forEach(k => {
     if (k.indexOf(RUNTIME_PROP.secret) === 0) {
       const data = JSON.parse(all[k] || '{}');
@@ -528,14 +528,14 @@ function runtimeTable_(depName, name, columns, mask) {
   };
 }
 
-function runtimeEnv_(dep, pod, st, logger, mask) {
+function runtimeEnv_(dep, pod, st, logger, mask, props) {
   let vars = {};
   if (String(dep.env || '').trim()) {
     try { vars = JSON.parse(String(dep.env)); } catch (e) { throw new Error('env column must be a JSON object: ' + e.message); }
   }
   const secrets = {};
   kvList(dep.secrets).forEach(name => {
-    const v = runtimeProps().getProperty(RUNTIME_PROP.secret + name);
+    const v = props ? props[RUNTIME_PROP.secret + name] : runtimeProps().getProperty(RUNTIME_PROP.secret + name);
     if (v === null || v === undefined) throw new Error('secret ' + name + ' not found');
     Object.assign(secrets, JSON.parse(v));
   });
@@ -567,10 +567,12 @@ function runtimeLogger_(mask) {
 function runtimeInvoke_(dep, pod, ev, opts) {
   opts = opts || {};
   const now = opts.now || Date.now();
-  const mask = runtimeMasker();
+  const props = runtimeProps().getProperties();     // one read for the masker and the pod's status
+  const mask = runtimeMasker(props);
   const logger = runtimeLogger_(mask);
   const st = runtimeState_(dep.name);
-  const status = runtimePropJSON(RUNTIME_PROP.pod + dep.name, {});
+  let status;
+  try { status = JSON.parse(props[RUNTIME_PROP.pod + dep.name] || '{}'); } catch (e) { status = {}; }
   try {
     if (opts.slot && (st.doc().cron[ev.schedule] || 0) >= opts.slot) return { ok: true, skipped: true };   // fired before
     const code = opts.code || runtimeCode_(dep);
@@ -578,7 +580,7 @@ function runtimeInvoke_(dep, pod, ev, opts) {
     new Function('exports', 'module', 'console', code.source)(mod.exports, mod, logger.console);
     const fn = (ev.type === 'run' && ev.fn && typeof mod.exports[ev.fn] === 'function') ? mod.exports[ev.fn] : mod.exports.handle;
     if (typeof fn !== 'function') throw new Error('the module exports no handle(event, env)');
-    const result = fn(ev, runtimeEnv_(dep, pod, st, logger, mask));
+    const result = fn(ev, runtimeEnv_(dep, pod, st, logger, mask, props));
     if (result && typeof result.then === 'function') throw new Error('handlers must be synchronous: Apps Script cannot run async functions');
     if (opts.slot) st.doc().cron[ev.schedule] = opts.slot;
     st.save();
