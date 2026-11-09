@@ -6,6 +6,16 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 
 ## [Unreleased]
 
+## [v0.0.0.0.0.6] — "On change and every hour" — 2026-11-10
+
+The cluster learned to do nothing cheaply. Apps Script counts every trigger execution
+from its start-up, and the Executions page showed that the idle KUBER KOMBAT cluster spent
+about 143 s an hour, almost two thirds of the 90-minute daily budget. Now an idle cluster
+runs two executions an hour (a lease-and-fingerprint pass and an idle tick, about 2 s an
+hour by the runtime's own counter, under 3% of the budget with start-up), reacts to edits
+and API calls at once, cleans up pods that never got a node, answers webhooks faster, and
+`skctl selftest` checks the formulas against real Google Sheets in any locale.
+
 ### Added
 - **`skctl selftest`** (`Selftest.gs`): the control plane against real Google Sheets. The
   cluster's web app creates a scratch spreadsheet per locale (en_US and ru_RU by default,
