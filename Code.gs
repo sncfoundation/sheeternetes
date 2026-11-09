@@ -68,6 +68,14 @@ function writeTab(name, objects) {
   if (!ss().getSheetByName(name)) ensureTabs();
   const sh = ss().getSheetByName(name);
   const header = TABS[name];
+  // A sheet set up by an older version has an older header row (and the `chosen`
+  // formula where a new data column now lives): upgrade it once per execution.
+  writeTab.checked = writeTab.checked || {};
+  if (!writeTab.checked[name]) {
+    writeTab.checked[name] = true;
+    const top = sh.getRange(1, 1, 1, header.length).getValues()[0];
+    if (header.some((h, i) => top[i] !== h)) ensureTabs();
+  }
   const rows = objects.map(o => header.map(h => (o[h] === undefined || o[h] === null) ? '' : o[h]));
   // clear old body, write new
   const lastRow = sh.getLastRow();
@@ -176,10 +184,54 @@ function formulaSchedule(pods, nodes) {
 // Keep exactly one formula per data row in the `chosen` column.
 function syncChosenColumn(sh, rowCount, previousLastRow) {
   if (SCHEDULER === 'formula' && rowCount > 0) {
-    sh.getRange(2, CHOSEN_COL, rowCount, 1).setFormula(schedulerFormula());
+    setFormulaInLocale(sh.getRange(2, CHOSEN_COL, rowCount, 1), schedulerFormula());
   }
   const from = (SCHEDULER === 'formula' ? rowCount : 0) + 2;
   if (previousLastRow >= from) sh.getRange(from, CHOSEN_COL, previousLastRow - from + 1, 1).clearContent();
+}
+
+// Every formula in this file is written in the en_US syntax: ',' between arguments,
+// ';' between rows of an array literal. setFormula() parses the text in the
+// SPREADSHEET's locale, though, and locales with a decimal comma (ru_RU, de_DE,
+// fr_FR, ...) separate arguments with ';' and array columns with '\'; there the
+// en_US text is a parse error (#ERROR!). The syntax is detected once with a probe
+// formula in the target cell and cached per locale.
+const FORMULA_SYNTAX_PROBE = '=SUM(1,2)';   // en_US: 3; decimal-comma locales: 1.2
+
+function formulaSyntax(probeCell) {
+  if (formulaSyntax.memo) return formulaSyntax.memo;
+  const cache = CacheService.getScriptCache();
+  const key = 'sheeternetes:formula-syntax:' + ss().getSpreadsheetLocale();
+  let syntax = cache.get(key);
+  if (syntax !== 'comma' && syntax !== 'semicolon') {
+    probeCell.setFormula(FORMULA_SYNTAX_PROBE);
+    SpreadsheetApp.flush();
+    syntax = Number(probeCell.getValue()) === 3 ? 'comma' : 'semicolon';
+    cache.put(key, syntax, 6 * 60 * 60);
+  }
+  formulaSyntax.memo = syntax;
+  return syntax;
+}
+
+// en_US formula text -> the syntax of a decimal-comma locale. String literals are
+// copied as is; a ',' becomes ';' between arguments and '\' between array columns.
+// (The formulas here contain no decimal numbers, so '.' never needs translating.)
+function toSemicolonSyntax(formula) {
+  let out = '', quote = '';
+  const nest = [];
+  for (const ch of formula) {
+    if (quote) { out += ch; if (ch === quote) quote = ''; continue; }   // "" / '' escapes reopen at once
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '(' || ch === '{') nest.push(ch);
+    else if (ch === ')' || ch === '}') nest.pop();
+    out += ch === ',' ? (nest[nest.length - 1] === '{' ? '\\' : ';') : ch;
+  }
+  return out;
+}
+
+function setFormulaInLocale(range, formula) {
+  const syntax = formulaSyntax(range.getCell(1, 1));
+  return range.setFormula(syntax === 'semicolon' ? toSemicolonSyntax(formula) : formula);
 }
 
 function colLetter(n) { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
@@ -602,7 +654,7 @@ function autoscaleFormulas() {
                      `IF(rq=0,"",ROUND(SUMIFS(${P('cpu_usage')},${running(d)})/rq*100,0)))`;
   const plan = (body) => `MAP($A$2:$A,$B$2:$B,$C$2:$C,$D$2:$D,LAMBDA(d,t,mn,mx,IF(d="","",` +
     `LET(cur,${cur('d')},u,${usage('d')},lo,MAX(1,N(mn)),hi,MAX(lo,IF(mx="",lo,N(mx))),` +
-    `raw,IF(OR(u="",N(t)<=0,cur=0),cur,IF(ABS(u/N(t)-1)<=${HPA_TOLERANCE},cur,CEILING(cur*u/N(t),1))),` +
+    `raw,IF(OR(u="",N(t)<=0,cur=0),cur,IF(ABS(u/N(t)-1)<=${Math.round(HPA_TOLERANCE * 100)}/100,cur,CEILING(cur*u/N(t),1))),` +
     `want,MIN(hi,MAX(lo,raw)),${body}))))`;
   return {
     current_replicas: `={"current_replicas";MAP($A$2:$A,LAMBDA(d,IF(d="","",${cur('d')})))}`,
@@ -618,7 +670,7 @@ function ensureAutoscale() {
   sh.getRange(1, 1, 1, AUTOSCALE_INPUT.length).setValues([AUTOSCALE_INPUT]).setFontWeight('bold');
   const f = autoscaleFormulas();
   AUTOSCALE_FORMULA.forEach((name, i) => {
-    sh.getRange(1, AUTOSCALE_INPUT.length + 1 + i).setFormula(f[name]).setFontWeight('bold');
+    setFormulaInLocale(sh.getRange(1, AUTOSCALE_INPUT.length + 1 + i), f[name]).setFontWeight('bold');
   });
   const stateCol = AUTOSCALE_INPUT.length + AUTOSCALE_FORMULA.length + 1;
   sh.getRange(1, stateCol, 1, 1).setValues([AUTOSCALE_STATE]).setFontWeight('bold');
@@ -783,6 +835,7 @@ function ensureTabs() {
     sh.setFrozenRows(1);
   });
   const pods = ss().getSheetByName('Pods');
+  pods.getRange(1, 1, 1, TABS.Pods.length).clearNote();   // an older `chosen` header's note
   pods.getRange(1, CHOSEN_COL, 1, 1).setValues([[CHOSEN_HEADER]]).setFontWeight('bold')
     .setNote('Computed by a Google Sheets formula: the node the scheduler picks for this pod. ' +
              'Do not edit. Set SCHEDULER = \'script\' in Code.gs to schedule in Apps Script instead.');

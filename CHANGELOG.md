@@ -6,6 +6,23 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 
 ## [Unreleased]
 
+### Fixed
+- **Formula scheduler in non-English spreadsheets.** `setFormula()` parses formula text
+  in the spreadsheet's locale, and in decimal-comma locales (ru_RU, de_DE, fr_FR, …)
+  arguments are separated by `;`, so the en_US text of the `chosen` column (and of the
+  Autoscale tab) was a "Formula parse error" and every reconcile pass fell back to the
+  Apps Script scheduler. Formulas are now written in the spreadsheet's own syntax,
+  detected once per locale with a probe formula (`=SUM(1,2)`) and cached.
+- A sheet set up by an older version is upgraded on the first write: a stale header row
+  (e.g. Pods without `cpu_usage`/`mem_usage`, `chosen` where a data column now lives) is
+  rewritten by `ensureTabs()` instead of silently shifting columns.
+
+### Tests
+- `hack/sheet-mock.js` emulates the locale (`SHEET_LOCALE`, default en_US): formula text
+  the locale cannot parse becomes `#ERROR!`, as in Google Sheets. CI runs the whole
+  control-plane suite in ru_RU too, and `hack/test-formula-scheduler.js` checks the exact
+  formula string written into every `chosen` cell for en_US, en_GB, ru_RU and de_DE.
+
 ## [v0.0.0.0.0.5] — "Extensions → Apps Script" — 2026-11-09
 
 Pods stopped needing a computer: a Deployment with `runtime: script` runs inside the

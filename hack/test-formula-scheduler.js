@@ -16,7 +16,7 @@
 const { loadControlPlane } = require('./sheet-mock');
 const { formulaChosen } = require('./formula-port');
 
-const api = loadControlPlane({ exports: ['orderForScheduling'] });
+const api = loadControlPlane({ exports: ['orderForScheduling', 'toSemicolonSyntax'] });
 api.ensureTabs();
 
 let pass = 0, fail = 0;
@@ -146,6 +146,47 @@ api.controlOp({ token: TOKEN, action: 'scale', name: 'web', replicas: 5 });
 const placedNew = api.readTab('Pods').filter(p => p.phase !== 'Terminating');
 check('cordon: new pods avoid node-a, old ones stay', placedNew.filter(p => p.node === 'node-a').length <= 2 &&
   placedNew.filter(p => p.node === 'node-b').length >= 3, placedNew.map(p => p.node));
+
+console.log('\n== formula text follows the spreadsheet locale ==');
+// setFormula() parses in the spreadsheet's locale; sheet-mock.js rejects text that the
+// locale cannot parse (#ERROR!), as Google Sheets does with en_US text in ru_RU.
+const { formulaParses } = require('./sheet-mock');
+const t = api.toSemicolonSyntax;
+check('toSemicolonSyntax: arguments, array columns, strings and sheet names',
+  t(`=IF('My, tab'!A1,"a,""b"",c",{1,2;3,4})`) === `=IF('My, tab'!A1;"a,""b"",c";{1\\2;3\\4})` &&
+  t('={"x";MAP(A2:A,LAMBDA(d,d))}') === '={"x";MAP(A2:A;LAMBDA(d;d))}', t(`=IF('My, tab'!A1,"a,""b"",c",{1,2;3,4})`));
+['en_US', 'en_GB', 'ru_RU', 'de_DE'].forEach(locale => {
+  const a = loadControlPlane({ locale, exports: ['toSemicolonSyntax', 'autoscaleFormulas'] });
+  a.ensureTabs();
+  ['a', 'b'].forEach(n => a.doPost({ postData: { contents: JSON.stringify({ token: TOKEN, node: 'node-' + n, ip: '10.0.0.1', cpu_total: 1000, mem_total: 1024, pods: [] }) } }));
+  a.controlOp({ token: TOKEN, action: 'apply', deployments: [{ name: 'web', image: 'nginx', replicas: 3, cpu_req: 200, mem_req: 64 }] });
+  const semi = /^(ru|de)_/.test(locale);
+  const want = semi ? a.toSemicolonSyntax(a.schedulerFormula()) : a.schedulerFormula();
+  const texts = Object.keys(a._formulas.Pods).map(k => a._formulas.Pods[k]);
+  check(`${locale}: every \`chosen\` cell holds the exact ${semi ? 'semicolon' : 'comma'}-syntax formula`,
+    texts.length === 3 && texts.every(x => x === want), texts.map(x => x.slice(0, 60)));
+  check(`${locale}: Google Sheets can parse it`, texts.every(x => formulaParses(x, locale)), texts[0].slice(0, 120));
+  const evs = a.readTab('Events').map(e => e.message);
+  check(`${locale}: pods placed by the formula, no script fallback`,
+    evs.filter(m => /\(formula\)$/.test(m)).length === 3 && !evs.some(m => /fallback/.test(m)), evs);
+  const as = Object.keys(a._formulas.Autoscale || {}).map(k => a._formulas.Autoscale[k]);
+  check(`${locale}: Autoscale formulas parse too`, as.length === 4 && as.every(x => formulaParses(x, locale)), as.map(x => x.slice(0, 60)));
+});
+
+console.log('\n== a sheet set up by an older version is upgraded ==');
+{
+  const a = loadControlPlane({ locale: 'ru_RU' });
+  a.ensureTabs();
+  // the header row of an older version: no cpu_usage/mem_usage, `chosen` right after tolerations
+  const old = a.TABS.Pods.slice(0, a.TABS.Pods.indexOf('tolerations') + 1).concat(['chosen']);
+  a._store.Pods[0] = old.concat(['', '']);
+  ['a'].forEach(n => a.doPost({ postData: { contents: JSON.stringify({ token: TOKEN, node: 'node-' + n, ip: '10.0.0.1', cpu_total: 1000, mem_total: 1024, pods: [] }) } }));
+  a.controlOp({ token: TOKEN, action: 'apply', deployments: [{ name: 'web', image: 'nginx', replicas: 2, cpu_req: 200, mem_req: 64 }] });
+  const header = a._store.Pods[0];
+  check('header row rewritten to the current columns', a.TABS.Pods.every((h, i) => header[i] === h) && header[a.TABS.Pods.length] === 'chosen', header);
+  const evs = a.readTab('Events').map(e => e.message);
+  check('and the formula scheduler places the pods', evs.filter(m => /\(formula\)$/.test(m)).length === 2 && !evs.some(m => /fallback/.test(m)), evs);
+}
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);

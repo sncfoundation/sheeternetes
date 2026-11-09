@@ -13,6 +13,27 @@ const path = require('path');
 
 const exposed = new Set();
 
+// A real Sheet parses setFormula() text in the spreadsheet's locale. Where the decimal
+// separator is a comma (ru_RU, de_DE, ...), arguments are separated by ';' and array
+// columns by '\', so en_US text with ',' outside string literals is a parse error;
+// en_US in turn rejects ';' outside an array literal and '\'. Code.gs detects the
+// syntax with FORMULA_SYNTAX_PROBE (=SUM(1,2): 3 in en_US, 1.2 where ',' is decimal).
+const FORMULA_SYNTAX_PROBE = '=SUM(1,2)';
+function semicolonLocale(locale) { return /^(ru|uk|be|kk|de|fr|es|it|pt|nl|pl|cs|sk|tr|sv|da|nb|fi|id|vi|el|hu|ro|bg|hr|sr|sl|lt|lv|et)(_|$)/.test(locale); }
+function formulaParses(text, locale) {
+  const semi = semicolonLocale(locale);
+  let quote = '', braces = 0;
+  for (const ch of String(text)) {
+    if (quote) { if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '{') braces++;
+    else if (ch === '}') braces--;
+    else if (semi && ch === ',') return false;
+    else if (!semi && (ch === '\\' || (ch === ';' && braces === 0))) return false;
+  }
+  return true;
+}
+
 function loadControlPlane(opts) {
   opts = opts || {};
   let codeText = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
@@ -28,6 +49,7 @@ function loadControlPlane(opts) {
   const reads = {};    // tab -> number of reads, so tests can prove a path never touches a tab   // tests push (tab, row, col, values) => throws, to inject crashes
   const recalc = opts.recalc || require('./formula-port').recalcPods;
   const store = {};
+  const locale = opts.locale || process.env.SHEET_LOCALE || 'en_US';
   const formulas = {};  // tab -> { "r,c": formulaText }
 
   function grid(name) { return store[name]; }
@@ -43,6 +65,16 @@ function loadControlPlane(opts) {
     // a real Sheet recalculates on every edit; emulate that on read
     if (name === 'Pods' && formulas.Pods && Object.keys(formulas.Pods).length) recalc(store, formulas.Pods);
     if (name === 'Autoscale' && formulas.Autoscale) require('./formula-port').recalcAutoscale(store, formulas.Autoscale);
+    // what the port cannot know: whether the Sheet could PARSE the text in its locale
+    const f = formulas[name] || {};
+    Object.keys(f).forEach(k => {
+      const [r, c] = k.split(',').map(Number);
+      const g = store[name];
+      if (f[k] === FORMULA_SYNTAX_PROBE) { g[r - 1][c - 1] = semicolonLocale(locale) ? 1.2 : 3; return; }
+      if (formulaParses(f[k], locale)) return;
+      g[r - 1][c - 1] = '#ERROR!';            // "Formula parse error."
+      if (r === 1) for (let i = 1; i < g.length; i++) if (g[i]) g[i][c - 1] = '';   // a header formula spills nothing
+    });
   }
   function rangeObj(name, row, col, nr, nc) {
     const g = store[name];
@@ -61,9 +93,11 @@ function loadControlPlane(opts) {
         cells((r, c, i, j) => { g[r][c] = v[i][j]; delete f[(r + 1) + ',' + (c + 1)]; }); return o;
       },
       setFormula(text) { cells((r, c) => { f[(r + 1) + ',' + (c + 1)] = text; g[r][c] = ''; }); return o; },
+      getCell(r, c) { return rangeObj(name, row + r - 1, col + c - 1, 1, 1); },
+      getValue() { return o.getValues()[0][0]; },
       getValues() { reads[name] = (reads[name] || 0) + 1; evaluate(name); const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = g[r][c] === undefined ? '' : g[r][c]; }); return out; },
       getFormulas() { const out = []; cells((r, c, i, j) => { (out[i] = out[i] || [])[j] = f[(r + 1) + ',' + (c + 1)] || ''; }); return out; },
-      setFontWeight() { return o; }, setNote() { return o; }, setBackground() { return o; },
+      setFontWeight() { return o; }, setNote() { return o; }, clearNote() { return o; }, setBackground() { return o; },
       setFontColor() { return o; }, setNumberFormat() { return o; },
     };
     return o;
@@ -145,6 +179,7 @@ function loadControlPlane(opts) {
     },
     getActiveSpreadsheet: () => ({
       getId: () => 'local',
+      getSpreadsheetLocale: () => locale,
       getSheetByName: (n) => (store[n] ? sheetApi(n) : null),
       insertSheet: (n) => { store[n] = store[n] || [[]]; return sheetApi(n); },
       deleteSheet: (sh) => { delete store[sh.getName()]; delete formulas[sh.getName()]; },
@@ -199,4 +234,4 @@ function loadControlPlane(opts) {
   return api;
 }
 
-module.exports = { loadControlPlane };
+module.exports = { loadControlPlane, formulaParses, semicolonLocale };
