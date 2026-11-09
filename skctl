@@ -28,6 +28,9 @@
 #   skctl logs <pod|deployment> [--previous]
 #   skctl webhook <deployment> [--rotate]   # prints the webhook URL (it carries a key: keep it private)
 #
+# A smoke check against real Google Sheets (scratch spreadsheets in the owner's Drive, trashed afterwards):
+#   skctl selftest [--locale en_US,ru_RU] [--keep]
+#
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # environment variables win over .skctl.env
@@ -162,6 +165,21 @@ case "$cmd" in
       rm) api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?secret}" '{token:$t, action:"secretDelete", name:$n}')" | or_fail ;;
       *) echo "usage: skctl secret set|ls|rm ..." >&2; exit 1 ;;
     esac
+    ;;
+  selftest)
+    locales=""; keep=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --locale) locales="${2:?--locale en_US,ru_RU}"; shift 2 ;;
+        --keep) keep=true; shift ;;
+        *) echo "usage: skctl selftest [--locale en_US,ru_RU] [--keep]" >&2; exit 1 ;;
+      esac
+    done
+    jq -n --arg t "$TOKEN" --arg l "$locales" --argjson k "$keep" '{token:$t, action:"selftest", locales:($l | split(",") | map(select(. != ""))), keep:$k}' \
+      | api_post_stdin | jq -r 'if .error then error(.error) else . end
+          | (.results[] | "\(.locale): \(if .ok then "PASS" else "FAIL" end) in \(.ms / 1000 | floor) s (\(.spreadsheet))",
+             (.checks[] | "  \(if .ok then "ok  " else "FAIL" end) \(.name)\(if .detail != "" then " -> " + .detail else "" end)")),
+            (if .ok then "selftest passed" else ("selftest FAILED\n" | halt_error(1)) end)'
     ;;
   run)
     name="${1:?deployment}"; shift

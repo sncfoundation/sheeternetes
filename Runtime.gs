@@ -279,6 +279,7 @@ function runtimeFingerprint_(deps, pods, nodes) {
 }
 
 function runtimeReconciled_(deps, pods, nodes) {
+  if (ss.override) return;      // a pass over a selftest's scratch sheet
   runtimeProps().setProperty(RUNTIME_PROP.fingerprint, runtimeFingerprint_(deps, pods, nodes));
 }
 

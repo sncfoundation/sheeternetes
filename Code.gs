@@ -46,7 +46,8 @@ DEPLOYMENT_SPEC.push('runtime', 'schedule', 'env', 'secrets', 'volumes');
 TABS.Logs.push('previous');
 
 // ---------- generic sheet <-> objects ----------
-function ss() { return SpreadsheetApp.getActiveSpreadsheet(); }
+// skctl selftest points the control plane at a scratch spreadsheet for a while (Selftest.gs)
+function ss() { return ss.override || SpreadsheetApp.getActiveSpreadsheet(); }
 
 function readTab(name) { return readTabFrom(ss(), name); }
 
@@ -624,6 +625,7 @@ function controlOp(body) {
 function addOnOp(body) {
   if (typeof sheetstorOp === 'function') { const r = sheetstorOp(body); if (r) return r; }
   if (typeof runtimeOp === 'function') { const r = runtimeOp(body); if (r) return r; }
+  if (typeof selftestOp === 'function') { const r = selftestOp(body); if (r) return r; }
   return null;
 }
 
