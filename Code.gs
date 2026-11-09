@@ -317,8 +317,17 @@ function reconcile() {
       }
     });
 
-    // 3) drop terminated/failed rows the agents have confirmed gone
-    pods = pods.filter(p => p.phase !== 'Deleted');
+    // 3) drop terminated/failed rows the agents have confirmed gone, and Terminating
+    //    pods with no node to stop them on: never scheduled, or their node is gone
+    //    from the Nodes tab (a NotReady node keeps its pods until it comes back)
+    pods = pods.filter(p => {
+      if (p.phase === 'Deleted') return false;
+      if (p.phase === 'Terminating' && !nodes.some(n => n.name === p.node)) {
+        event('Pod', p.name, p.node ? 'deleted (node ' + p.node + ' is gone)' : 'deleted (never ran on a node)');
+        return false;
+      }
+      return true;
+    });
 
     // 4) reconcile replicas per deployment
     deployments.forEach(dep => {
@@ -414,6 +423,7 @@ function reconcile() {
 
     writeTab('Pods', pods);
     writeTab('Nodes', nodes);
+    if (typeof runtimeReconciled_ === 'function') runtimeReconciled_(deployments, pods, nodes);
     return { pods: pods, nodes: nodes };
   } finally {
     lock.releaseLock();

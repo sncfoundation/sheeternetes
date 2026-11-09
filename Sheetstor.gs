@@ -34,9 +34,12 @@ const SHEETSTOR_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const SHEETSTOR_LOCK_MS = 30000;
 
 // ---------- the script lock ----------
+// Taking the lock forgets what was read before it: another execution may have
+// written in between.
 function skLocked(fn, waitMs) {
   const lock = LockService.getScriptLock();
   lock.waitLock(waitMs || SHEETSTOR_LOCK_MS);
+  sheetstorForget_();
   try { return fn(); } finally { lock.releaseLock(); }
 }
 
@@ -44,6 +47,7 @@ function skLocked(fn, waitMs) {
 function skTryLocked(fn, waitMs) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(waitMs || SHEETSTOR_LOCK_MS)) return { locked: false };
+  sheetstorForget_();
   try { return { locked: true, value: fn() }; } finally { lock.releaseLock(); }
 }
 
@@ -81,12 +85,19 @@ function sheetstorEnsure() {
   return sh;
 }
 
+// The registry is read once per lock: every lookup of an invocation (code, state,
+// mounted volumes) shares that read, and every registry write forgets it.
 function sheetstorVolumes() {
-  return readTab(SHEETSTOR_REGISTRY).map(v => ({
-    name: String(v.name), mode: String(v.mode || 'rw'), generation: Number(v.generation) || 0,
-    files: Number(v.files) || 0, size: Number(v.size) || 0, sha256: String(v.sha256 || ''), updated_at: v.updated_at,
-  }));
+  if (!sheetstorVolumes.memo) {
+    sheetstorVolumes.memo = readTab(SHEETSTOR_REGISTRY).map(v => ({
+      name: String(v.name), mode: String(v.mode || 'rw'), generation: Number(v.generation) || 0,
+      files: Number(v.files) || 0, size: Number(v.size) || 0, sha256: String(v.sha256 || ''), updated_at: v.updated_at,
+    }));
+  }
+  return sheetstorVolumes.memo.map(v => Object.assign({}, v));
 }
+
+function sheetstorForget_() { sheetstorVolumes.memo = null; }
 
 function sheetstorVolume_(name) {
   const v = sheetstorVolumes().find(x => x.name === String(name));
@@ -106,6 +117,7 @@ function sheetstorSetRegistry_(vol) {
   let row = names.indexOf(vol.name) + 1;
   if (row <= 0) row = Math.max(2, sh.getLastRow() + 1);
   sh.getRange(row, 1, 1, SHEETSTOR_COLUMNS.length).setValues([SHEETSTOR_COLUMNS.map(c => vol[c] === undefined ? '' : vol[c])]);
+  sheetstorForget_();
 }
 
 function sheetstorCreate(name, opts) {
@@ -141,6 +153,7 @@ function sheetstorDeleteVolume(name) {
     const reg = sheetstorEnsure();
     const names = reg.getDataRange().getValues().map(r => String(r[0]));
     reg.deleteRows(names.indexOf(String(name)) + 1, 1);
+    sheetstorForget_();
     const sh = ss().getSheetByName(SHEETSTOR_TAB_PREFIX + name);
     if (sh) ss().deleteSheet(sh);
     event('Volume', name, 'deleted');
@@ -250,8 +263,8 @@ function sheetstorWrite_(name, path, data, opts) {
   sheetstorSetRegistry_(flipped);
   SpreadsheetApp.flush();
   sheetstorGc_(sh, generation);
-  return opts.tombstone ? { volume: name, path: path, generation: generation, deleted: true }
-    : { volume: name, path: path, generation: generation, size: group[0][4], sha256: group[0][5] };
+  return opts.tombstone ? { volume: name, path: path, generation: generation, manifest: summary.sha256, deleted: true }
+    : { volume: name, path: path, generation: generation, manifest: summary.sha256, size: group[0][4], sha256: group[0][5] };
 }
 
 // -> { bytes, size, sha256, generation, contentType }
@@ -272,6 +285,32 @@ function sheetstorRead_(name, path) {
     throw new Error('corrupt file ' + name + ':/' + path + ': checksum mismatch');
   }
   return { bytes: bytes, size: bytes.length, sha256: sha, generation: group[0].generation, contentType: skContentType(path) };
+}
+
+// A text file through CacheService. The key carries the volume's manifest digest
+// (every path with its sha256), so any write to the volume, or a volume deleted and
+// created again under the same name, misses the old entry. One registry read on a hit.
+const SHEETSTOR_TEXT_CACHE_MAX = 90000;     // CacheService keeps values up to 100 KB
+const SHEETSTOR_TEXT_CACHE_S = 6 * 60 * 60;
+
+function sheetstorTextKey_(name, manifest, path) { return 'sk.file.' + String(manifest).slice(7, 39) + '.' + name + '/' + path; }
+
+function sheetstorReadText_(name, path) {
+  path = sheetstorCheckPath_(path);
+  const vol = sheetstorVolume_(name);
+  const cache = CacheService.getScriptCache();
+  const key = sheetstorTextKey_(name, vol.sha256, path);
+  const hit = cache.get(key);
+  if (hit) return JSON.parse(hit);
+  const f = sheetstorRead_(name, path);
+  const out = { text: Utilities.newBlob(f.bytes).getDataAsString(), sha256: f.sha256 };
+  sheetstorCacheText_(name, vol.sha256, path, out);
+  return out;
+}
+
+function sheetstorCacheText_(name, manifest, path, file) {
+  const value = JSON.stringify(file);
+  if (value.length < SHEETSTOR_TEXT_CACHE_MAX) CacheService.getScriptCache().put(sheetstorTextKey_(name, manifest, path), value, SHEETSTOR_TEXT_CACHE_S);
 }
 
 function sheetstorList_(name) {
@@ -297,7 +336,7 @@ function sheetstorHandle_(name, readOnly) {
       const f = sheetstorRead_(name, path);
       return Utilities.newBlob(f.bytes, f.contentType, String(path).split('/').pop());
     },
-    readText: (path) => h.read(path).getDataAsString(),
+    readText: (path) => sheetstorReadText_(name, path).text,
     readJSON: (path) => JSON.parse(h.readText(path)),
     exists: (path) => sheetstorList_(name).some(f => f.path === sheetstorCheckPath_(path)),
     list: () => sheetstorList_(name),

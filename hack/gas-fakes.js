@@ -39,6 +39,11 @@ function makeFakes(opts) {
   const Properties = {
     getProperty: (k) => (k in props ? props[k] : null),
     setProperty: (k, v) => { props[k] = String(v); return Properties; },
+    setProperties: (o, deleteAllOthers) => {
+      if (deleteAllOthers) Object.keys(props).forEach(k => delete props[k]);
+      Object.keys(o).forEach(k => { props[k] = String(o[k]); });
+      return Properties;
+    },
     deleteProperty: (k) => { delete props[k]; return Properties; },
     getProperties: () => Object.assign({}, props),
     getKeys: () => Object.keys(props),
@@ -68,8 +73,13 @@ function makeFakes(opts) {
     getProjectTriggers: () => triggers.slice(),
     deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); },
     getOAuthToken: () => 'mock-token',
-    newTrigger: (fn) => ({ timeBased: () => ({ everyMinutes: (n) => ({ create: () => {
-      const t = { getHandlerFunction: () => fn, minutes: n }; triggers.push(t); return t; } }) }) }),
+    newTrigger: (fn) => {
+      const make = (extra) => ({ create: () => { const t = Object.assign({ getHandlerFunction: () => fn }, extra); triggers.push(t); return t; } });
+      return {
+        timeBased: () => ({ everyMinutes: (n) => make({ minutes: n }) }),
+        forSpreadsheet: () => ({ onEdit: () => make({ onEdit: true }) }),
+      };
+    },
   };
 
   const cache = {};

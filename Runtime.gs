@@ -7,8 +7,9 @@
  * ordinary reconcile loop and the formula scheduler place script pods on it like
  * any other pod. This file is that node's kubelet:
  *
- *   runtimeTick()      every minute: renew the node lease, reconcile when needed,
- *                      move pods through their phases, fire due `schedule` slots;
+ *   runtimeTick()      renew the node lease, reconcile when needed, move pods
+ *                      through their phases, fire due `schedule` slots (every
+ *                      minute while something is due, every 30 minutes otherwise);
  *   runtimeWebhook(e)  doPost ?pod=<deployment>&key=<key>: delivers the request body;
  *   runtimeOp(body)    skctl run / secret / webhook.
  *
@@ -29,9 +30,13 @@
 const RUNTIME_NODE = 'apps-script';
 const RUNTIME_LABEL = 'runtime=script';
 const RUNTIME_FIELDS = ['runtime', 'schedule', 'env', 'secrets', 'volumes'];
-const RUNTIME_LEASE_MS = 15 * 60 * 1000;       // the node's heartbeat is stamped this far ahead...
-const RUNTIME_RENEW_MS = 5 * 60 * 1000;        // ...and renewed when less than this is left
-const RUNTIME_RECONCILE_EVERY_MS = 10 * 60 * 1000;
+const RUNTIME_SLOW_MINUTES = 30;              // the trigger that is always installed
+const RUNTIME_SLOW_MS = RUNTIME_SLOW_MINUTES * 60 * 1000;
+const RUNTIME_FAST_LINGER_MS = 15 * 60 * 1000; // the 1-minute trigger stays this long after the last due work
+const RUNTIME_TRIGGERS = 'v2';                 // the trigger layout; a tick of an older layout installs this one
+const RUNTIME_LEASE_MS = 75 * 60 * 1000;       // the node's heartbeat is stamped this far ahead...
+const RUNTIME_RENEW_MS = 45 * 60 * 1000;       // ...and renewed when less than this is left (every slow tick)
+const RUNTIME_RECONCILE_EVERY_MS = RUNTIME_SLOW_MS;   // the backstop compares a fingerprint this often
 const RUNTIME_CATCHUP_MS = 15 * 60 * 1000;     // a late tick still fires slots this old
 const RUNTIME_BACKOFF_MAX_MS = 60 * 60 * 1000;
 const RUNTIME_RUN_PAUSE_MS = 6 * 60 * 1000;    // a one-off run's pause marker expires (Apps Script's execution limit)
@@ -41,7 +46,8 @@ const RUNTIME_STATE_PATH = 'state.json';
 const RUNTIME_IMAGE = /^sheetstor:\/\/([a-z0-9-]+)\/(.+)$/;
 const RUNTIME_PROP = { secret: 'sk.secret.', webhook: 'sk.webhook.', pod: 'sk.pod.', cron: 'sk.cron.', run: 'sk.run.', attempts: 'sk.attempts.',
                        sleep: 'sk.sleep.', quota: 'sk.quota.', flushed: 'sk.quota-flushed', reconciled: 'sk.reconciled',
-                       next: 'sk.tick-next' };
+                       next: 'sk.tick-next', precise: 'sk.tick-precise', fast: 'sk.tick-fast', triggers: 'sk.triggers',
+                       fingerprint: 'sk.fingerprint' };
 const RUNTIME_QUOTA_TAB = 'Runtime';
 const RUNTIME_QUOTA_MS = 90 * 60 * 1000;       // consumer accounts: triggers total runtime per day
 const RUNTIME_QUOTA_FLUSH_MS = 10 * 60 * 1000;
@@ -128,16 +134,26 @@ function runtimeHeartbeat_(now, nodes) {
 }
 
 // ---------- the tick ----------
-// The budget: an idle tick reads Script Properties once and returns. After every full
-// pass the tick records when there is work again (the lease, the reconcile backstop,
-// the earliest pod that is awake or wakes up); any API call, a webhook or
-// env.sleepUntil clears that mark (runtimeWake). A full pass reads Nodes,
-// Deployments and Pods once and touches no volume unless a slot is due.
+// The budget. Apps Script counts every execution of a trigger from its start-up
+// (about a second before the first line runs), so the cheapest tick is the one
+// that does not happen: a 1-minute trigger exists only while something is due
+// within the next half hour (an awake pod, a pod waking up soon, the autoscaler,
+// work the reconcile loop has not finished), and a 30-minute trigger stays
+// installed for the lease and the backstop. Any API call, an edit of the Sheet by
+// hand and env.sleepUntil install the fast trigger again (runtimeWake).
+//
+// Within a tick: an idle tick reads Script Properties once and returns. After every
+// full pass the tick records when there is work again; a full pass reads Nodes,
+// Deployments and Pods once, runs the reconcile loop only when something is not
+// converged or the tabs differ from what the last pass left (a fingerprint), and
+// touches no volume unless a slot is due.
 function runtimeTick() {
   const now = Date.now();
-  const props0 = runtimeProps().getProperties();
+  let props0 = runtimeProps().getProperties();
+  if (props0[RUNTIME_PROP.triggers] !== RUNTIME_TRIGGERS) { runtimeInstallTriggers_(now); props0 = runtimeProps().getProperties(); }
   if (now < Number(props0[RUNTIME_PROP.next] || 0)) {
-    runtimeQuota_(now, props0);
+    runtimeTriggers_(now, props0);
+    runtimeQuota_(now, props0, 'idle');
     return { skipped: 'idle' };
   }
   let out;
@@ -153,11 +169,13 @@ function runtimeTick() {
     if (!fired.length) runtimeIdleUntil_(now, deps, pods, nodes);
     return { fired: fired };
   });
+  let kind = 'pass';
   if (!first.locked) {
     out = { skipped: 'busy' };
   } else if (!first.value.reconcile) {
     out = { fired: first.value.fired, reconciled: false };
   } else {
+    kind = 'reconcile';
     reconcile();
     runtimeProps().setProperty(RUNTIME_PROP.reconciled, String(now));
     const second = skTryLocked(() => {
@@ -169,36 +187,108 @@ function runtimeTick() {
     });
     out = second.locked ? { fired: second.value, reconciled: true } : { skipped: 'busy' };
   }
-  runtimeQuota_(now);
+  const props = runtimeProps().getProperties();
+  runtimeTriggers_(now, props);
+  runtimeQuota_(now, props, kind);
   return out;
 }
 
-function runtimeWake() { runtimeProps().deleteProperty(RUNTIME_PROP.next); }
+// Something may have work for the tick: forget the idle mark and make sure the
+// 1-minute trigger runs. Cheap when it already does (one property read).
+function runtimeWake() {
+  const p = runtimeProps();
+  p.deleteProperty(RUNTIME_PROP.next);
+  if (!Number(p.getProperty(RUNTIME_PROP.fast) || 0)) runtimeFastTrigger_(true, Date.now());
+}
 
-// When the next full pass is needed if nothing calls runtimeWake() before.
+// An installable on-edit trigger: a change typed into the Sheet wakes the loop at once.
+function runtimeOnEdit() { runtimeWake(); }
+
+// When the next full pass is needed if nothing calls runtimeWake() before. Two marks:
+// `next` for any work, `precise` for work that must not wait for the slow trigger
+// (the lease and the backstop can).
 function runtimeIdleUntil_(now, deps, pods, nodes) {
   const props = runtimeProps().getProperties();
   const node = nodes.find(n => n.name === RUNTIME_NODE);
-  const times = [
-    node ? Date.parse(String(node.last_heartbeat)) - RUNTIME_RENEW_MS : now,
-    Number(props[RUNTIME_PROP.reconciled] || 0) + RUNTIME_RECONCILE_EVERY_MS,
+  // a few minutes early, so the slow trigger never lands just before them and waits another half hour
+  const early = 3 * 60000;
+  const routine = [
+    node ? Date.parse(String(node.last_heartbeat)) - RUNTIME_RENEW_MS - early : now,
+    Number(props[RUNTIME_PROP.reconciled] || 0) + RUNTIME_RECONCILE_EVERY_MS - early,
   ];
-  if (readTab('Autoscale').length) times.push(now);
+  const precise = [];
+  if (readTab('Autoscale').length) precise.push(now);
   deps.filter(d => isScriptDeployment(d) && String(d.schedule || '').trim() && runtimeLeader_(d.name, pods)).forEach(d => {
     let t = Number(props[RUNTIME_PROP.sleep + d.name] || 0);
     try { const st = JSON.parse(props[RUNTIME_PROP.pod + d.name] || '{}'); if (st.backoff_until) t = Math.max(t, Date.parse(st.backoff_until)); }
     catch (e) { t = now; }
-    times.push(t);
+    precise.push(t);
   });
-  const next = Math.min.apply(null, times);
-  if (next > now + 30000) runtimeProps().setProperty(RUNTIME_PROP.next, String(next - 30000));
+  const soonest = precise.length ? Math.min.apply(null, precise) : now + 365 * 86400000;
+  const next = Math.min.apply(null, routine.concat([soonest]));
+  if (next > now + 30000) {
+    runtimeProps().setProperties({ [RUNTIME_PROP.next]: String(next - 30000), [RUNTIME_PROP.precise]: String(soonest - 30000) });
+  }
   return next;
 }
 
+// Installs or removes the 1-minute trigger when the due work says so. `fast` holds
+// when that trigger was last needed (0: not installed).
+function runtimeTriggers_(now, props) {
+  const fast = Number(props[RUNTIME_PROP.fast] || 0);
+  const idle = now < Number(props[RUNTIME_PROP.next] || 0);
+  const soon = !idle || Number(props[RUNTIME_PROP.precise] || 0) - now < RUNTIME_SLOW_MS + 60000;
+  if (soon && (!fast || now - fast > 5 * 60000)) runtimeFastTrigger_(true, now);
+  else if (!soon && fast && now - fast > RUNTIME_FAST_LINGER_MS) runtimeFastTrigger_(false, now);
+}
+
+function runtimeFastTrigger_(on, now) {
+  const p = runtimeProps();
+  const mine = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'runtimeTick');
+  if (on) {
+    if (!mine.length) ScriptApp.newTrigger('runtimeTick').timeBased().everyMinutes(1).create();
+    p.setProperty(RUNTIME_PROP.fast, String(now));
+  } else {
+    mine.forEach(t => ScriptApp.deleteTrigger(t));
+    p.setProperty(RUNTIME_PROP.fast, '0');
+  }
+}
+
+// The whole layout: the slow trigger, the on-edit trigger, and the fast one to begin
+// with. Replaces the triggers of older versions (one runtimeTick every minute, or the
+// plain reconcile timer).
+function runtimeInstallTriggers_(now) {
+  const ours = ['runtimeTick', 'runtimeTickSlow', 'runtimeOnEdit', 'reconcile'];
+  ScriptApp.getProjectTriggers().forEach(t => { if (ours.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runtimeTickSlow').timeBased().everyMinutes(RUNTIME_SLOW_MINUTES).create();
+  ScriptApp.newTrigger('runtimeOnEdit').forSpreadsheet(ss()).onEdit().create();
+  ScriptApp.newTrigger('runtimeTick').timeBased().everyMinutes(1).create();
+  runtimeProps().setProperties({ [RUNTIME_PROP.fast]: String(now), [RUNTIME_PROP.triggers]: RUNTIME_TRIGGERS });
+}
+
+function runtimeTickSlow() { return runtimeTick(); }
+
+// What the tabs look like after a reconcile pass (reconcile() records it). The
+// backstop runs the loop again only when the tabs no longer match, e.g. after an
+// edit by hand. Heartbeat times are left out: the lease renews them on its own.
+function runtimeFingerprint_(deps, pods, nodes) {
+  const cell = v => (v instanceof Date ? v.toISOString() : String(v === undefined || v === null ? '' : v));
+  const rows = (list, cols) => list.map(o => cols.map(c => cell(o[c])));
+  const nodeCols = TABS.Nodes.filter(c => c !== 'last_heartbeat');
+  return skSha256(skBytes(JSON.stringify([rows(deps, TABS.Deployments), rows(pods, TABS.Pods), rows(nodes, nodeCols)])));
+}
+
+function runtimeReconciled_(deps, pods, nodes) {
+  runtimeProps().setProperty(RUNTIME_PROP.fingerprint, runtimeFingerprint_(deps, pods, nodes));
+}
+
 // Trigger time per day, in Script Properties on every tick and in the Runtime tab
-// every few minutes: date, ticks, trigger_ms, max_tick_ms, budget_ms, used_percent.
-// (Apps Script also counts the start-up of each execution, which a script cannot see.)
-function runtimeQuota_(started, props) {
+// every few minutes: date, ticks, trigger_ms, max_tick_ms, budget_ms, used_percent,
+// and what the ticks did (idle, full passes, reconcile passes).
+// (Apps Script also counts the start-up of each execution, which a script cannot
+// see: about a second per tick on the Executions page.)
+const RUNTIME_QUOTA_HEADER = ['date', 'ticks', 'trigger_ms', 'max_tick_ms', 'budget_ms', 'used_percent', 'idle', 'passes', 'reconciles'];
+function runtimeQuota_(started, props, kind) {
   const p = runtimeProps();
   props = props || p.getProperties();
   const day = new Date(started).toISOString().slice(0, 10);
@@ -206,32 +296,45 @@ function runtimeQuota_(started, props) {
   try { q = JSON.parse(props[RUNTIME_PROP.quota + day] || ''); } catch (e) { q = { ticks: 0, ms: 0, max: 0 }; }
   const took = Date.now() - started;
   q.ticks += 1; q.ms += took; q.max = Math.max(q.max, took);
+  const k = { idle: 'idle', pass: 'passes', reconcile: 'reconciles' }[kind];
+  if (k) q[k] = (q[k] || 0) + 1;
   p.setProperty(RUNTIME_PROP.quota + day, JSON.stringify(q));
   if (started - Number(props[RUNTIME_PROP.flushed] || 0) < RUNTIME_QUOTA_FLUSH_MS) return q;
   p.setProperty(RUNTIME_PROP.flushed, String(started));
   let sh = ss().getSheetByName(RUNTIME_QUOTA_TAB);
-  const header = ['date', 'ticks', 'trigger_ms', 'max_tick_ms', 'budget_ms', 'used_percent'];
-  if (!sh) { sh = ss().insertSheet(RUNTIME_QUOTA_TAB); sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold'); }
+  const header = RUNTIME_QUOTA_HEADER;
+  if (!sh) sh = ss().insertSheet(RUNTIME_QUOTA_TAB);
+  const grid = sh.getDataRange().getValues();
+  if (grid[0].length < header.length || header.some((h, i) => grid[0][i] !== h)) sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
   const label = day + ' UTC';     // not a date to Sheets, so it stays text
-  const days = sh.getDataRange().getValues().map(r => String(r[0]));
+  const days = grid.map(r => String(r[0]));
   let row = days.indexOf(label) + 1;
-  if (row <= 1) row = Math.max(2, sh.getLastRow() + 1);
-  sh.getRange(row, 1, 1, header.length).setValues([[label, q.ticks, q.ms, q.max, RUNTIME_QUOTA_MS, Math.round(q.ms / RUNTIME_QUOTA_MS * 1000) / 10]]);
+  if (row <= 1) row = Math.max(2, grid.length + 1);
+  sh.getRange(row, 1, 1, header.length).setValues([[label, q.ticks, q.ms, q.max, RUNTIME_QUOTA_MS, Math.round(q.ms / RUNTIME_QUOTA_MS * 1000) / 10,
+                                                     q.idle || 0, q.passes || 0, q.reconciles || 0]]);
   // old days are dropped from Script Properties once they are in the tab
   p.getKeys().filter(k => k.indexOf(RUNTIME_PROP.quota) === 0 && k < RUNTIME_PROP.quota + day).forEach(k => p.deleteProperty(k));
   return q;
 }
 
 // The control loop is skipped while everything is converged: Apps Script grants a
-// consumer account 90 minutes of trigger time a day.
+// consumer account 90 minutes of trigger time a day. The backstop (every 30 minutes)
+// runs it when the tabs differ from what the last reconcile pass left.
 function runtimeNeedsReconcile_(deps, pods, nodes, now, props) {
-  const last = Number((props || {})[RUNTIME_PROP.reconciled] || 0);
-  if (now - last >= RUNTIME_RECONCILE_EVERY_MS) return true;
+  props = props || {};
+  const last = Number(props[RUNTIME_PROP.reconciled] || 0);
+  if (now - last >= RUNTIME_RECONCILE_EVERY_MS - 4 * 60000) {
+    if (runtimeFingerprint_(deps, pods, nodes) !== props[RUNTIME_PROP.fingerprint]) return true;
+    runtimeProps().setProperty(RUNTIME_PROP.reconciled, String(now));   // checked: still converged
+  }
   if (readTab('Autoscale').length) return true;          // the HPA wants a pass every minute
   if (nodes.some(n => n.status === 'Ready' && now - Date.parse(String(n.last_heartbeat)) >= HEARTBEAT_TIMEOUT_MS)) return true;
-  // a Terminating pod without a node waits for nobody: it does not make the loop run
-  if (pods.some(p => p.phase === 'Pending' || p.phase === 'Scheduled' || p.phase === 'Deleted' ||
-                     (p.phase === 'Terminating' && p.node))) return true;
+  // a Terminating pod waits for its kubelet; one without a (known) node is collected by the loop
+  const known = {}, ready = {};
+  nodes.forEach(n => { known[n.name] = true; if (n.status === 'Ready') ready[n.name] = true; });
+  // (an Unschedulable pod waits for a change: a node, an edit, an API call)
+  if (pods.some(p => (p.phase === 'Pending' && p.message !== UNSCHEDULABLE) || p.phase === 'Scheduled' || p.phase === 'Deleted' ||
+                     (p.phase === 'Terminating' && (!known[p.node] || ready[p.node])))) return true;
   const live = p => p.phase !== 'Terminating' && p.phase !== 'Deleted';
   return deps.some(d => pods.filter(p => p.deployment === d.name && live(p)).length !== (Number(d.replicas) || 0));
 }
@@ -351,8 +454,9 @@ function runtimeState_(depName) {
   const load = () => {
     if (doc) return doc;
     let text = '';
-    if (sheetstorVolumes().some(v => v.name === vol) && sheetstorList_(vol).some(f => f.path === RUNTIME_STATE_PATH)) {
-      text = Utilities.newBlob(sheetstorRead_(vol, RUNTIME_STATE_PATH).bytes).getDataAsString();
+    if (sheetstorVolumes().some(v => v.name === vol)) {
+      try { text = sheetstorReadText_(vol, RUNTIME_STATE_PATH).text; }
+      catch (e) { if (!/^no such file/.test(e.message)) throw e; }
     }
     doc = text ? JSON.parse(text) : {};
     doc.data = doc.data === undefined ? {} : doc.data;
@@ -371,7 +475,8 @@ function runtimeState_(depName) {
       const text = JSON.stringify(doc);
       if (text === original) return false;
       if (!sheetstorVolumes().some(v => v.name === vol)) sheetstorCreate_(vol, { ifMissing: true });
-      sheetstorWrite_(vol, RUNTIME_STATE_PATH, text);
+      const res = sheetstorWrite_(vol, RUNTIME_STATE_PATH, text);
+      sheetstorCacheText_(vol, res.manifest, RUNTIME_STATE_PATH, { text: text, sha256: res.sha256 });   // the next invocation reads no cell
       original = text;
       return true;
     },
@@ -389,20 +494,12 @@ function runtimeState_(depName) {
 }
 
 // ---------- invoking a pod ----------
-// The source is cached per volume generation: one registry read when nothing changed.
+// The source comes through the text cache: one registry read when nothing changed.
 function runtimeCode_(dep) {
   const m = RUNTIME_IMAGE.exec(String(dep.image || ''));
   if (!m) throw new Error('image must be sheetstor://<volume>/<path>, got "' + dep.image + '"');
-  const vol = sheetstorVolume_(m[1]);
-  const key = 'sk.code.' + vol.name + '.' + vol.generation + '.' + m[2];
-  const cache = CacheService.getScriptCache();
-  const hit = cache.get(key);
-  if (hit) return JSON.parse(hit);
-  const f = sheetstorRead_(m[1], m[2]);
-  const code = { source: Utilities.newBlob(f.bytes).getDataAsString(), sha256: f.sha256 };
-  const text = JSON.stringify(code);
-  if (text.length < 90000) cache.put(key, text, 21600);
-  return code;
+  const f = sheetstorReadText_(m[1], m[2]);
+  return { source: f.text, sha256: f.sha256 };
 }
 
 // env.table(name, columns): an append-only log in the hidden tab table-<deployment>-<name>.
@@ -422,6 +519,7 @@ function runtimeTable_(depName, name, columns, mask) {
   const dec = v => (typeof v === 'string' && v.charAt(0) === '"' ? JSON.parse(v) : v);
   return {
     append: (obj) => { sh.appendRow([new Date().toISOString()].concat(columns.map(c => enc(obj[c])))); },
+    count: () => Math.max(0, sh.getLastRow() - 1),   // rows only grow: a cheap version for caches
     rows: () => {
       const g = sh.getDataRange().getValues();
       const h = g.shift() || [];
@@ -665,13 +763,10 @@ function runtimeGet(p) {
   return null;
 }
 
-// Called by setup(): the node, the Volumes tab, and one trigger that replaces the
+// Called by setup(): the node, the Volumes tab, and the triggers that replace the
 // plain reconcile timer (runtimeTick reconciles whenever something is not converged).
 function setupRuntime() {
   sheetstorEnsure();
   skLocked(() => runtimeHeartbeat_(Date.now()));
-  ScriptApp.getProjectTriggers().forEach(t => {
-    if (t.getHandlerFunction() === 'runtimeTick' || t.getHandlerFunction() === 'reconcile') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('runtimeTick').timeBased().everyMinutes(1).create();
+  runtimeInstallTriggers_(Date.now());
 }
