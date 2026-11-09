@@ -470,8 +470,26 @@ node hack/test.js                     # scheduling, scale, overcommit, node-fail
 SCHEDULER=script node hack/test.js    # the same suite on the Apps Script scheduler
 node hack/test-formula-scheduler.js   # formula scheduler == script scheduler == on-prem schedule()
 node hack/test-sheetstor.js           # volumes in cells: chunks, sha256, crash-safe generations
-node hack/test-runtime.js             # script pods: slots, webhooks, runs, secrets, backoff, budget
+node hack/test-runtime.js             # script pods: slots, webhooks, runs, secrets, backoff, budget, triggers
+node hack/test-selftest.js            # the checks of skctl selftest, on the mock Sheet
 ```
+
+**Against real Google Sheets** — the mock emulates only what we know about Sheets
+(formula syntax per locale was learned on a live cluster). `skctl selftest` asks
+Google: the cluster's web app creates a scratch spreadsheet per locale in the
+owner's Drive (en_US and ru_RU by default), runs the tab setup, a reconcile pass
+with the formula scheduler and the autoscaler's formulas, checks what the cells
+computed, and moves the file to the trash:
+
+```bash
+skctl selftest                          # en_US and ru_RU, ~15 s each
+skctl selftest --locale de_DE,ja_JP --keep   # keep the scratch sheets to look at them
+```
+
+It runs on a cluster rather than in CI on purpose: it needs nothing but the
+cluster's own URL and token, while a CI job would need either those (which control
+the whole cluster) or a Google credential with Drive access stored in GitHub.
+Run it after every deploy.
 
 **Full end-to-end with real containers, no Google** — `hack/local-apiserver.js`
 serves the exact `Code.gs` control plane backed by an in-memory store, so real
@@ -525,6 +543,8 @@ recording.
 | `skctl revisions` | list the Sheet's version history |
 | `skctl restore --revision <id> \| --at <time> [--tabs …] [--dry-run]` | roll the desired state back |
 | `skctl tour` | guided demo |
+| `skctl selftest [--locale en_US,ru_RU] [--keep]` | the control plane against scratch Google Sheets per locale |
+| `skctl get budget` | trigger time per day: ticks, idle ones, full passes, reconciles |
 | `skctl get scripts\|volumes\|secrets` | script pods, Sheetstor volumes, secret names |
 | `skctl volume create <name> [--ro]` / `ls [<name>]` / `put <name> <path> <file>` / `get <name> <path> [<file>]` / `rm <name> <path>` / `delete <name>` | Sheetstor volumes in cells |
 | `skctl secret set <name> KEY=VALUE…` (`KEY=-` reads stdin) / `ls` / `rm <name>` | secrets in Script Properties |

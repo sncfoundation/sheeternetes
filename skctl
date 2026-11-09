@@ -28,6 +28,9 @@
 #   skctl logs <pod|deployment> [--previous]
 #   skctl webhook <deployment> [--rotate]   # prints the webhook URL (it carries a key: keep it private)
 #
+# A smoke check against real Google Sheets (scratch spreadsheets in the owner's Drive, trashed afterwards):
+#   skctl selftest [--locale en_US,ru_RU] [--keep]
+#
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # environment variables win over .skctl.env
@@ -52,7 +55,7 @@ case "$cmd" in
     case "$kind" in
       scripts) api_get scripts | jq -r '["NAME","POD","REPLICAS","SCHEDULE","WEBHOOK","RESTARTS","LAST_RUN","LAST_ERROR"], (.items[]|[.name,(.pod|if . == "" then "<none>" else . end),.replicas,(.schedule|tostring|if . == "" then "<none>" else .[0:40] end),.webhook,.restarts,(.last_run|if . == "" then "<never>" else . end),(.last_error|if . == "" then "<none>" else .[0:60] end)]) | @tsv' | column -t -s $'\t'; exit ;;
       volumes) api_get volumes | jq -r '["NAME","MODE","GENERATION","FILES","SIZE","SHA256"], (.items[]|[.name,.mode,.generation,.files,.size,(.sha256|.[0:19])]) | @tsv' | column -t -s $'\t'; exit ;;
-      budget) api_get budget | jq -r '["DATE","TICKS","TRIGGER_MS","MAX_TICK_MS","USED_%"], (.items[]|[.date,.ticks,.trigger_ms,.max_tick_ms,.used_percent]), (.today|select(.)|["today (live)",.ticks,.ms,.max,((.ms/5400000*1000|round)/10)]) | @tsv' | column -t -s $'\t'; exit ;;
+      budget) api_get budget | jq -r '["DATE","TICKS","TRIGGER_MS","MAX_TICK_MS","USED_%","IDLE","PASSES","RECONCILES"], (.items[]|[.date,.ticks,.trigger_ms,.max_tick_ms,.used_percent,(.idle // ""),(.passes // ""),(.reconciles // "")]), (.today|select(.)|["today (live)",.ticks,.ms,.max,((.ms/5400000*1000|round)/10),(.idle // 0),(.passes // 0),(.reconciles // 0)]) | @tsv' | column -t -s $'\t'; exit ;;
       secrets) api_get secrets | jq -r '["NAME","KEYS"], (.items[]|[.name,(.keys|join(","))]) | @tsv' | column -t -s $'\t'; exit ;;
     esac
     case "$kind" in
@@ -162,6 +165,21 @@ case "$cmd" in
       rm) api_post "$(jq -n --arg t "$TOKEN" --arg n "${1:?secret}" '{token:$t, action:"secretDelete", name:$n}')" | or_fail ;;
       *) echo "usage: skctl secret set|ls|rm ..." >&2; exit 1 ;;
     esac
+    ;;
+  selftest)
+    locales=""; keep=false
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --locale) locales="${2:?--locale en_US,ru_RU}"; shift 2 ;;
+        --keep) keep=true; shift ;;
+        *) echo "usage: skctl selftest [--locale en_US,ru_RU] [--keep]" >&2; exit 1 ;;
+      esac
+    done
+    jq -n --arg t "$TOKEN" --arg l "$locales" --argjson k "$keep" '{token:$t, action:"selftest", locales:($l | split(",") | map(select(. != ""))), keep:$k}' \
+      | api_post_stdin | jq -r 'if .error then error(.error) else . end
+          | (.results[] | "\(.locale): \(if .ok then "PASS" else "FAIL" end) in \(.ms / 1000 | floor) s (\(.spreadsheet))",
+             (.checks[] | "  \(if .ok then "ok  " else "FAIL" end) \(.name)\(if .detail != "" then " -> " + .detail else "" end)")),
+            (if .ok then "selftest passed" else ("selftest FAILED\n" | halt_error(1)) end)'
     ;;
   run)
     name="${1:?deployment}"; shift
