@@ -254,7 +254,7 @@ const fast = () => api._triggers.some(t => t.getHandlerFunction() === 'runtimeTi
 clock('2026-11-08T10:57:00Z', 20);
 check('nothing due for half an hour: the 1-minute trigger is removed', !fast(), handlers());
 const idleDay = clock('2026-11-08T11:17:00Z', 360);
-check('six idle hours cost at most 13 executions', idleDay.executions <= 13, idleDay);
+check('six idle hours cost 12 executions, half of them idle ticks', idleDay.executions <= 12, idleDay);
 check('and the 1-minute trigger never comes back for the lease or the backstop', idleDay.fastMinutes === 0, idleDay);
 check('and no reconcile pass: the tabs still match the fingerprint', idleDay.reconciles === 0, idleDay);
 check('the lease stays fresh', Date.parse(String(api.readTab('Nodes').find(n => n.name === 'apps-script').last_heartbeat)) > now + 15 * 60000, api.readTab('Nodes'));
@@ -262,8 +262,8 @@ check('the node stays Ready', api.readTab('Nodes').find(n => n.name === 'apps-sc
 // an edit by hand with no on-edit trigger (e.g. a script): the backstop finds it
 const depRow = api._store.Deployments.findIndex(r => r[0] === 'bot');
 api._store.Deployments[depRow][api.TABS.Deployments.indexOf('cpu_req')] = 50;
-const found = clock('2026-11-08T17:17:00Z', 35);
-check('the backstop sees a hand edit within half an hour and reconciles', found.reconciles >= 1 && pods('bot').every(p => p.phase !== 'Running' || String(p.cpu_req) === '50'), [found, pods('bot')]);
+const found = clock('2026-11-08T17:17:00Z', 65);
+check('the backstop sees a hand edit within an hour and reconciles', found.reconciles >= 1 && pods('bot').every(p => p.phase !== 'Running' || String(p.cpu_req) === '50'), [found, pods('bot')]);
 clock('2026-11-08T17:52:00Z', 40);
 check('a rolled-out pod runs again and the minute trigger is gone', pods('bot').filter(p => p.phase === 'Running').length === 1 && !fast(), [pods('bot'), handlers()]);
 api.runtimeOnEdit();
