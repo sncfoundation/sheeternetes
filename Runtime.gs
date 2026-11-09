@@ -34,8 +34,8 @@ const RUNTIME_SLOW_MINUTES = 30;              // the trigger that is always inst
 const RUNTIME_SLOW_MS = RUNTIME_SLOW_MINUTES * 60 * 1000;
 const RUNTIME_FAST_LINGER_MS = 15 * 60 * 1000; // the 1-minute trigger stays this long after the last due work
 const RUNTIME_TRIGGERS = 'v2';                 // the trigger layout; a tick of an older layout installs this one
-const RUNTIME_LEASE_MS = 75 * 60 * 1000;       // the node's heartbeat is stamped this far ahead...
-const RUNTIME_RENEW_MS = 45 * 60 * 1000;       // ...and renewed when less than this is left (every slow tick)
+const RUNTIME_LEASE_MS = 90 * 60 * 1000;       // the node's heartbeat is stamped this far ahead...
+const RUNTIME_RENEW_MS = 60 * 60 * 1000;       // ...and renewed once no more than this is left (every slow tick)
 const RUNTIME_RECONCILE_EVERY_MS = RUNTIME_SLOW_MS;   // the backstop compares a fingerprint this often
 const RUNTIME_CATCHUP_MS = 15 * 60 * 1000;     // a late tick still fires slots this old
 const RUNTIME_BACKOFF_MAX_MS = 60 * 60 * 1000;
@@ -119,7 +119,7 @@ function runtimeSecretSet(name, data) {
 function runtimeHeartbeat_(now, nodes) {
   nodes = nodes || readTab('Nodes');
   let n = nodes.find(x => x.name === RUNTIME_NODE);
-  const fresh = n && Date.parse(String(n.last_heartbeat)) - now > RUNTIME_RENEW_MS && n.status === 'Ready';
+  const fresh = n && Date.parse(String(n.last_heartbeat)) - now > RUNTIME_RENEW_MS + 60000 && n.status === 'Ready';   // a pass at the renewal mark renews
   if (fresh) return false;
   if (!n) {
     n = { name: RUNTIME_NODE, ip: 'script.google.com', cpu_total: 100000, mem_total: 100000, cpu_used: 0, mem_used: 0,
@@ -210,11 +210,13 @@ function runtimeOnEdit() { runtimeWake(); }
 function runtimeIdleUntil_(now, deps, pods, nodes) {
   const props = runtimeProps().getProperties();
   const node = nodes.find(n => n.name === RUNTIME_NODE);
-  // a few minutes early, so the slow trigger never lands just before them and waits another half hour
-  const early = 3 * 60000;
+  // The lease is renewed by the first pass at or after its mark; a slow tick that lands
+  // just before the mark idles, and the lease still has half an hour left at the next one.
+  // The backstop is due a few minutes early, and its check (runtimeNeedsReconcile_)
+  // accepts that, so a slow tick never waits another half hour for it.
   const routine = [
-    node ? Date.parse(String(node.last_heartbeat)) - RUNTIME_RENEW_MS - early : now,
-    Number(props[RUNTIME_PROP.reconciled] || 0) + RUNTIME_RECONCILE_EVERY_MS - early,
+    node ? Date.parse(String(node.last_heartbeat)) - RUNTIME_RENEW_MS : now,
+    Number(props[RUNTIME_PROP.reconciled] || 0) + RUNTIME_RECONCILE_EVERY_MS - 3 * 60000,
   ];
   const precise = [];
   if (readTab('Autoscale').length) precise.push(now);
@@ -226,9 +228,9 @@ function runtimeIdleUntil_(now, deps, pods, nodes) {
   });
   const soonest = precise.length ? Math.min.apply(null, precise) : now + 365 * 86400000;
   const next = Math.min.apply(null, routine.concat([soonest]));
-  if (next > now + 30000) {
-    runtimeProps().setProperties({ [RUNTIME_PROP.next]: String(next - 30000), [RUNTIME_PROP.precise]: String(soonest - 30000) });
-  }
+  const marks = { [RUNTIME_PROP.precise]: String(soonest - 30000) };
+  if (next > now + 30000) marks[RUNTIME_PROP.next] = String(next - 30000);
+  runtimeProps().setProperties(marks);
   return next;
 }
 
@@ -236,8 +238,7 @@ function runtimeIdleUntil_(now, deps, pods, nodes) {
 // when that trigger was last needed (0: not installed).
 function runtimeTriggers_(now, props) {
   const fast = Number(props[RUNTIME_PROP.fast] || 0);
-  const idle = now < Number(props[RUNTIME_PROP.next] || 0);
-  const soon = !idle || Number(props[RUNTIME_PROP.precise] || 0) - now < RUNTIME_SLOW_MS + 60000;
+  const soon = Number(props[RUNTIME_PROP.precise] || 0) - now < RUNTIME_SLOW_MS + 60000;   // routine work waits for the slow trigger
   if (soon && (!fast || now - fast > 5 * 60000)) runtimeFastTrigger_(true, now);
   else if (!soon && fast && now - fast > RUNTIME_FAST_LINGER_MS) runtimeFastTrigger_(false, now);
 }

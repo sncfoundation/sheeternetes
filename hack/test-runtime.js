@@ -232,15 +232,19 @@ tick('2026-11-08T10:55:30Z'); tick('2026-11-08T10:56:30Z');
 check('Terminating pods that never got a node are collected by the loop', pods('nginx').length === 0 &&
   api.readTab('Events').filter(e => /deleted \(never ran on a node\)/.test(e.message)).length === 2, pods('nginx'));
 // Apps Script's clock: every minute the 1-minute trigger fires if installed, every 30 the slow one
+let slowTicks = 0;
 const quota = () => JSON.parse(api._props['sk.quota.' + new Date(now).toISOString().slice(0, 10)] || '{}');
 const clock = (from, minutes) => {
-  const out = { executions: 0, reconciles: 0 };
+  const out = { executions: 0, reconciles: 0, fastMinutes: 0 };
   const r0 = quota().reconciles || 0;
   for (let m = 0; m < minutes; m++) {
     now = Date.parse(from) + m * 60000;
     const has = h => api._triggers.some(t => t.getHandlerFunction() === h);
-    if (has('runtimeTick')) { api.runtimeTick(); out.executions++; }
-    if (has('runtimeTickSlow') && (now / 60000) % 30 === 7) { api.runtimeTickSlow(); out.executions++; }
+    if (has('runtimeTick')) { api.runtimeTick(); out.executions++; out.fastMinutes++; }
+    if (has('runtimeTickSlow') && (now / 60000) % 30 === 7) {   // Apps Script jitters the slow trigger by seconds
+      now += [8000, 2000, 14000, 5000][slowTicks++ % 4];
+      api.runtimeTickSlow(); out.executions++;
+    }
   }
   out.reconciles = (quota().reconciles || 0) - r0;
   return out;
@@ -249,25 +253,25 @@ api._props['sk.sleep.bot'] = String(Date.parse('2026-11-09T10:00:00Z'));   // th
 const fast = () => api._triggers.some(t => t.getHandlerFunction() === 'runtimeTick');
 clock('2026-11-08T10:57:00Z', 20);
 check('nothing due for half an hour: the 1-minute trigger is removed', !fast(), handlers());
-const idleDay = clock('2026-11-08T11:17:00Z', 180);
-check('three idle hours cost at most 7 executions', idleDay.executions <= 7, idleDay);
-console.log('    (three idle hours: ' + JSON.stringify(idleDay) + ')');
+const idleDay = clock('2026-11-08T11:17:00Z', 360);
+check('six idle hours cost at most 13 executions', idleDay.executions <= 13, idleDay);
+check('and the 1-minute trigger never comes back for the lease or the backstop', idleDay.fastMinutes === 0, idleDay);
 check('and no reconcile pass: the tabs still match the fingerprint', idleDay.reconciles === 0, idleDay);
 check('the lease stays fresh', Date.parse(String(api.readTab('Nodes').find(n => n.name === 'apps-script').last_heartbeat)) > now + 15 * 60000, api.readTab('Nodes'));
 check('the node stays Ready', api.readTab('Nodes').find(n => n.name === 'apps-script').status === 'Ready', null);
 // an edit by hand with no on-edit trigger (e.g. a script): the backstop finds it
 const depRow = api._store.Deployments.findIndex(r => r[0] === 'bot');
 api._store.Deployments[depRow][api.TABS.Deployments.indexOf('cpu_req')] = 50;
-const found = clock('2026-11-08T14:17:00Z', 35);
+const found = clock('2026-11-08T17:17:00Z', 35);
 check('the backstop sees a hand edit within half an hour and reconciles', found.reconciles >= 1 && pods('bot').every(p => p.phase !== 'Running' || String(p.cpu_req) === '50'), [found, pods('bot')]);
-clock('2026-11-08T14:52:00Z', 40);
+clock('2026-11-08T17:52:00Z', 40);
 check('a rolled-out pod runs again and the minute trigger is gone', pods('bot').filter(p => p.phase === 'Running').length === 1 && !fast(), [pods('bot'), handlers()]);
 api.runtimeOnEdit();
 check('an edit in the Sheet installs the 1-minute trigger at once', fast(), handlers());
 api._triggers.splice(0, api._triggers.length);
 delete api._props['sk.triggers'];
 api._triggers.push({ getHandlerFunction: () => 'runtimeTick', minutes: 1 });   // the layout of v0.0.0.0.0.5
-tick('2026-11-08T15:40:10Z');
+tick('2026-11-08T18:40:10Z');
 check('a cluster of the old layout gets the new triggers on its next tick', JSON.stringify(handlers()) === '["runtimeOnEdit/edit","runtimeTick/1","runtimeTickSlow/30"]', handlers());
 post({ action: 'scale', name: 'bot', replicas: 1 });
 check('the reconcile pass records the fingerprint', /^sha256:/.test(api._props['sk.fingerprint'] || ''), null);
