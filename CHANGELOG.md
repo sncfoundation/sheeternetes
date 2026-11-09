@@ -6,6 +6,13 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 
 ## [Unreleased]
 
+## [v0.0.0.0.0.5] — "Extensions → Apps Script" — 2026-11-09
+
+Pods stopped needing a computer: a Deployment with `runtime: script` runs inside the
+spreadsheet's own Apps Script project, with volumes on cells and secrets in Script
+Properties. Its first production workload was the KUBER KOMBAT Telegram bot, run as a
+script pod in a live Telegram test.
+
 ### Added
 - **Script pods** (`Runtime.gs`, `docs/script-runtime.md`): a Deployment with
   `runtime: script` runs as a synchronous JavaScript module inside the cluster's own
@@ -39,6 +46,15 @@ however many zeroes we feel like, because the spreadsheet is eternal.
   Existing clusters re-run `setup()` once to grant them.
 - `skctl` no longer forces `POST` on the redirect Apps Script answers with, which the
   real web app refused with HTTP 405.
+
+### Known limitations
+- On a real Google Sheet the formula scheduler's `chosen` column returns an error, so
+  every reconcile pass falls back to the Apps Script scheduler (Events: `formula
+  column returned an error -> script fallback`). Pods are still placed, by the
+  script scheduler.
+- Script pods run synchronously under the script lock and within Apps Script's quotas
+  (execution time per invocation, triggers per day); `runtimeTick` records the trigger
+  time spent per day in the `Runtime` tab.
 
 ## [v0.0.0.0.0.4] — "Version History" — 2026-11-08
 
