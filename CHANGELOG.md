@@ -23,11 +23,11 @@ however many zeroes we feel like, because the spreadsheet is eternal.
   execution from its start-up (about a second the script never sees), so a 1-minute tick
   that only read one property still cost 0.6–1.5 s, and an idle cluster spent more than
   half of the 90-minute daily budget. The runtime now keeps a 30-minute trigger
-  (`runtimeTickSlow`) for the node lease (90 minutes, renewed every half hour) and the
-  backstop, and installs the 1-minute trigger only while something is due within half an
+  (`runtimeTickSlow`) for the node lease (two and a half hours, renewed hourly) and the
+  hourly backstop, and installs the 1-minute trigger only while something is due within half an
   hour; API calls, `env.sleepUntil` and an edit by hand (an installable on-edit trigger)
   bring it back at once. A cluster of an older version switches on its next tick.
-- The backstop no longer reconciles every ten minutes: it compares a fingerprint of
+- The backstop runs hourly instead of every ten minutes and no longer reconciles by default: it compares a fingerprint of
   Deployments, Pods and Nodes with what the last reconcile pass left and runs the loop
   only when they differ (e.g. after an edit by hand). An Unschedulable pod no longer makes
   every full pass reconcile.

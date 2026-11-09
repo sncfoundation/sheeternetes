@@ -17,7 +17,7 @@ Apps Script project as an ordinary node:
 | `name` | `apps-script` |
 | `labels` | `runtime=script` |
 | `taints` | `runtime=script:NoSchedule` |
-| `last_heartbeat` | a lease, stamped 90 minutes ahead and renewed every half hour |
+| `last_heartbeat` | a lease, stamped two and a half hours ahead and renewed every hour |
 
 `skctl apply` gives every `runtime: script` Deployment the node selector and the
 toleration `runtime=script`, so the formula scheduler places its pod on
@@ -30,7 +30,7 @@ plain reconcile timer:
 1. renews the node lease;
 2. runs `reconcile()` when something is not converged (a pod that is Pending or
    Scheduled, a replica count that differs, a stale node, a Terminating pod with no
-   node to stop it on, a non-empty Autoscale tab), and every half hour when the
+   node to stop it on, a non-empty Autoscale tab), and every hour when the
    tabs differ from what the last reconcile pass left (a fingerprint of Deployments,
    Pods and Nodes);
 3. moves pods on `apps-script` from Scheduled to Running and from Terminating to
@@ -45,7 +45,7 @@ spends a third to a half of the budget on doing nothing. Hence two time triggers
 
 | Trigger | Runs | Installed |
 | --- | --- | --- |
-| `runtimeTickSlow` | every 30 minutes | always: the lease and the backstop |
+| `runtimeTickSlow` | every 30 minutes | always: the lease and the backstop (each hourly) |
 | `runtimeTick` | every minute | while something is due within half an hour: an awake pod, a pod that wakes up soon, the autoscaler, unfinished reconcile work; removed 15 minutes after the last of it |
 | `runtimeOnEdit` | on an edit by hand in the Sheet | always: wakes the loop at once |
 
@@ -54,7 +54,7 @@ installs the 1-minute trigger again when it is gone. Within a tick, after each f
 pass the tick notes when it next has work, and until then a tick reads Script
 Properties once and returns. A full pass reads Nodes, Deployments and Pods once and
 touches no volume unless a slot is due. An idle cluster thus runs two executions an
-hour, mostly lease renewals that do not reconcile. A cluster of an older version
+hour: one full pass that renews the lease and checks the fingerprint, and one idle tick. A cluster of an older version
 switches to these triggers on its next tick.
 
 Every tick adds its duration to a per-day counter, and the `Runtime` tab shows ticks,

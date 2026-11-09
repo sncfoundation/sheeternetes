@@ -34,9 +34,9 @@ const RUNTIME_SLOW_MINUTES = 30;              // the trigger that is always inst
 const RUNTIME_SLOW_MS = RUNTIME_SLOW_MINUTES * 60 * 1000;
 const RUNTIME_FAST_LINGER_MS = 15 * 60 * 1000; // the 1-minute trigger stays this long after the last due work
 const RUNTIME_TRIGGERS = 'v2';                 // the trigger layout; a tick of an older layout installs this one
-const RUNTIME_LEASE_MS = 90 * 60 * 1000;       // the node's heartbeat is stamped this far ahead...
-const RUNTIME_RENEW_MS = 60 * 60 * 1000;       // ...and renewed once no more than this is left (every slow tick)
-const RUNTIME_RECONCILE_EVERY_MS = RUNTIME_SLOW_MS;   // the backstop compares a fingerprint this often
+const RUNTIME_LEASE_MS = 150 * 60 * 1000;      // the node's heartbeat is stamped this far ahead...
+const RUNTIME_RENEW_MS = 90 * 60 * 1000;       // ...and renewed once no more than this is left (every hour)
+const RUNTIME_RECONCILE_EVERY_MS = 60 * 60 * 1000;   // the backstop compares a fingerprint this often
 const RUNTIME_CATCHUP_MS = 15 * 60 * 1000;     // a late tick still fires slots this old
 const RUNTIME_BACKOFF_MAX_MS = 60 * 60 * 1000;
 const RUNTIME_RUN_PAUSE_MS = 6 * 60 * 1000;    // a one-off run's pause marker expires (Apps Script's execution limit)
@@ -149,6 +149,7 @@ function runtimeHeartbeat_(now, nodes) {
 // touches no volume unless a slot is due.
 function runtimeTick() {
   const now = Date.now();
+  runtimeAutoscaling_.memo = undefined;
   let props0 = runtimeProps().getProperties();
   if (props0[RUNTIME_PROP.triggers] !== RUNTIME_TRIGGERS) { runtimeInstallTriggers_(now); props0 = runtimeProps().getProperties(); }
   if (now < Number(props0[RUNTIME_PROP.next] || 0)) {
@@ -195,6 +196,12 @@ function runtimeTick() {
 
 // Something may have work for the tick: forget the idle mark and make sure the
 // 1-minute trigger runs. Cheap when it already does (one property read).
+// Whether the Autoscale tab has rows; read once per tick.
+function runtimeAutoscaling_() {
+  if (runtimeAutoscaling_.memo === undefined) runtimeAutoscaling_.memo = readTab('Autoscale').length > 0;
+  return runtimeAutoscaling_.memo;
+}
+
 function runtimeWake() {
   const p = runtimeProps();
   p.deleteProperty(RUNTIME_PROP.next);
@@ -219,7 +226,7 @@ function runtimeIdleUntil_(now, deps, pods, nodes) {
     Number(props[RUNTIME_PROP.reconciled] || 0) + RUNTIME_RECONCILE_EVERY_MS - 3 * 60000,
   ];
   const precise = [];
-  if (readTab('Autoscale').length) precise.push(now);
+  if (runtimeUnconverged_(deps, pods, nodes, now)) precise.push(now);
   deps.filter(d => isScriptDeployment(d) && String(d.schedule || '').trim() && runtimeLeader_(d.name, pods)).forEach(d => {
     let t = Number(props[RUNTIME_PROP.sleep + d.name] || 0);
     try { const st = JSON.parse(props[RUNTIME_PROP.pod + d.name] || '{}'); if (st.backoff_until) t = Math.max(t, Date.parse(st.backoff_until)); }
@@ -329,7 +336,12 @@ function runtimeNeedsReconcile_(deps, pods, nodes, now, props) {
     if (runtimeFingerprint_(deps, pods, nodes) !== props[RUNTIME_PROP.fingerprint]) return true;
     runtimeProps().setProperty(RUNTIME_PROP.reconciled, String(now));   // checked: still converged
   }
-  if (readTab('Autoscale').length) return true;          // the HPA wants a pass every minute
+  return runtimeUnconverged_(deps, pods, nodes, now);
+}
+
+// Work the reconcile loop has not finished (also keeps the 1-minute trigger).
+function runtimeUnconverged_(deps, pods, nodes, now) {
+  if (runtimeAutoscaling_()) return true;          // the HPA wants a pass every minute
   if (nodes.some(n => n.status === 'Ready' && now - Date.parse(String(n.last_heartbeat)) >= HEARTBEAT_TIMEOUT_MS)) return true;
   // a Terminating pod waits for its kubelet; one without a (known) node is collected by the loop
   const known = {}, ready = {};
