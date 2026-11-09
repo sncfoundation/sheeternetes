@@ -6,7 +6,42 @@ however many zeroes we feel like, because the spreadsheet is eternal.
 
 ## [Unreleased]
 
+### Added
+- **`skctl selftest`** (`Selftest.gs`): the control plane against real Google Sheets. The
+  cluster's web app creates a scratch spreadsheet per locale (en_US and ru_RU by default,
+  `--locale` for others) in the owner's Drive, runs the tab setup, a reconcile pass with
+  the formula scheduler and the autoscaler's formulas, checks the computed cells (syntax
+  detected, every pod placed by the formula, formula and Apps Script scheduler agree,
+  selectors and taints, HPA columns) and moves the file to the trash (`--keep` keeps it).
+  It needs nothing but the cluster's URL and token, so no Google credential lives in CI;
+  `hack/test-selftest.js` runs the same checks on the mock.
+- `skctl get budget` shows idle ticks, full passes and reconcile passes per day.
+- `env.table(...).count()`: the row count of an append-only table, for caches.
+
+### Changed
+- **An idle cluster runs two executions an hour.** Apps Script counts every trigger
+  execution from its start-up (about a second the script never sees), so a 1-minute tick
+  that only read one property still cost 0.6–1.5 s, and an idle cluster spent more than
+  half of the 90-minute daily budget. The runtime now keeps a 30-minute trigger
+  (`runtimeTickSlow`) for the node lease (75 minutes, renewed every half hour) and the
+  backstop, and installs the 1-minute trigger only while something is due within half an
+  hour; API calls, `env.sleepUntil` and an edit by hand (an installable on-edit trigger)
+  bring it back at once. A cluster of an older version switches on its next tick.
+- The backstop no longer reconciles every ten minutes: it compares a fingerprint of
+  Deployments, Pods and Nodes with what the last reconcile pass left and runs the loop
+  only when they differ (e.g. after an edit by hand). An Unschedulable pod no longer makes
+  every full pass reconcile.
+- Script pods read less per event: the volume registry is read once per lock, volumes
+  mounted into a pod are looked up on first use, one Script Properties read serves the
+  masker, the pod's status and its secrets, and code, state and text files on volumes come
+  through CacheService keyed by the volume's manifest digest. On the live cluster a
+  `/score` answer of the KUBER KOMBAT pod went from 6.1–7.9 s to 2.5–4.1 s.
+
 ### Fixed
+- **Terminating pods that never got a node** (a Deployment deleted while its pods were
+  Unschedulable, e.g. in a cluster without Docker nodes) stayed in the Pods tab forever.
+  The reconcile loop now deletes Terminating pods that have no node to stop them on, or
+  whose node is gone from the Nodes tab, with an Event.
 - **Formula scheduler in non-English spreadsheets.** `setFormula()` parses formula text
   in the spreadsheet's locale, and in decimal-comma locales (ru_RU, de_DE, fr_FR, …)
   arguments are separated by `;`, so the en_US text of the `chosen` column (and of the
