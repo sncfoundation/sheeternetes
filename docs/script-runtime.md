@@ -17,7 +17,7 @@ Apps Script project as an ordinary node:
 | `name` | `apps-script` |
 | `labels` | `runtime=script` |
 | `taints` | `runtime=script:NoSchedule` |
-| `last_heartbeat` | a lease, stamped 75 minutes ahead and renewed every half hour |
+| `last_heartbeat` | a lease, stamped 90 minutes ahead and renewed every half hour |
 
 `skctl apply` gives every `runtime: script` Deployment the node selector and the
 toleration `runtime=script`, so the formula scheduler places its pod on
