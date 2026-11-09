@@ -27,6 +27,14 @@ jobs:
           done
       - name: Same suite on the Apps Script scheduler
         run: SCHEDULER=script node hack/test.js
+      - name: Same suite in a decimal-comma locale (ru_RU formula syntax)
+        run: |
+          set -e
+          for t in hack/test*.js; do
+            echo "::group::SHEET_LOCALE=ru_RU $t"
+            SHEET_LOCALE=ru_RU node "$t"
+            echo "::endgroup::"
+          done
 
   shell:
     name: Shell scripts (bash -n + shellcheck)
