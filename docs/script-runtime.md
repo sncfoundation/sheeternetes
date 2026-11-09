@@ -17,34 +17,50 @@ Apps Script project as an ordinary node:
 | `name` | `apps-script` |
 | `labels` | `runtime=script` |
 | `taints` | `runtime=script:NoSchedule` |
-| `last_heartbeat` | a lease, stamped 15 minutes ahead and renewed every ten minutes |
+| `last_heartbeat` | a lease, stamped 75 minutes ahead and renewed every half hour |
 
 `skctl apply` gives every `runtime: script` Deployment the node selector and the
 toleration `runtime=script`, so the formula scheduler places its pod on
 `apps-script` and never places a Docker pod there. Replicas, rolling updates,
 Events and `scale` work as for any Deployment.
 
-`Runtime.gs` is the kubelet of that node. One time trigger, `runtimeTick`, replaces
-the plain reconcile timer and runs about once a minute:
+`Runtime.gs` is the kubelet of that node. Its tick, `runtimeTick`, replaces the
+plain reconcile timer:
 
 1. renews the node lease;
 2. runs `reconcile()` when something is not converged (a pod that is Pending or
-   Scheduled, a replica count that differs, a stale node, a non-empty Autoscale tab)
-   and in any case every ten minutes;
+   Scheduled, a replica count that differs, a stale node, a Terminating pod with no
+   node to stop it on, a non-empty Autoscale tab), and every half hour when the
+   tabs differ from what the last reconcile pass left (a fingerprint of Deployments,
+   Pods and Nodes);
 3. moves pods on `apps-script` from Scheduled to Running and from Terminating to
    Deleted;
 4. fires the schedule slots that are due, unless the pod asked to sleep.
 
-A consumer Google account gets 90 minutes of trigger time a day, about 3.7 seconds
-per minute. After each full pass the tick notes when it next has work — the lease
-renewal, the reconcile backstop, the earliest pod that is awake — and until then a
-tick reads Script Properties once and returns. Any API call and `env.sleepUntil`
-clear that note. A full pass reads Nodes, Deployments and Pods once and touches no
-volume unless a slot is due. Edits made by hand in the Sheet are therefore picked up
-within ten minutes, or at the next API call. Every tick adds its duration to a per-day
-counter, and the `Runtime` tab shows ticks, trigger milliseconds, the slowest tick
-and the share of the budget used (Apps Script also counts each execution's
-start-up, which a script cannot measure, so keep a margin). `skctl get budget` prints it.
+A consumer Google account gets 90 minutes of trigger time a day, and Apps Script
+counts every execution from its start-up: about a second passes before the first
+line of a tick runs (the project's Executions page shows it), so a tick that only
+reads one property still costs 0.6–1.5 seconds. A trigger that fires every minute
+spends a third to a half of the budget on doing nothing. Hence two time triggers:
+
+| Trigger | Runs | Installed |
+| --- | --- | --- |
+| `runtimeTickSlow` | every 30 minutes | always: the lease and the backstop |
+| `runtimeTick` | every minute | while something is due within half an hour: an awake pod, a pod that wakes up soon, the autoscaler, unfinished reconcile work; removed 15 minutes after the last of it |
+| `runtimeOnEdit` | on an edit by hand in the Sheet | always: wakes the loop at once |
+
+Any API call, an edit by hand and `env.sleepUntil` call `runtimeWake()`, which
+installs the 1-minute trigger again when it is gone. Within a tick, after each full
+pass the tick notes when it next has work, and until then a tick reads Script
+Properties once and returns. A full pass reads Nodes, Deployments and Pods once and
+touches no volume unless a slot is due. An idle cluster thus runs two executions an
+hour, mostly lease renewals that do not reconcile. A cluster of an older version
+switches to these triggers on its next tick.
+
+Every tick adds its duration to a per-day counter, and the `Runtime` tab shows ticks,
+trigger milliseconds, the slowest tick, the share of the budget used, and how many
+ticks were idle, full passes and reconcile passes. The start-up is not in these
+numbers, so count about a second per tick on top. `skctl get budget` prints it.
 
 A script Deployment runs **one** pod: if `replicas` is above 1, only the oldest
 Running pod receives events. `replicas: 0` pauses it, `replicas: 1` resumes it.
@@ -220,7 +236,7 @@ sha256, and the state volume is never touched.
 ## Setting up a cluster
 
 1. Create a Google Sheet, open *Extensions → Apps Script*, and add `Code.gs`,
-   `Sheetstor.gs`, `Runtime.gs` and `appsscript.json` (or `clasp push` them).
+   `Sheetstor.gs`, `Runtime.gs`, `Selftest.gs` and `appsscript.json` (or `clasp push` them).
    Set `TOKEN` in `Code.gs`.
 2. **Run `setup()` once from the editor and grant the permissions.** The project
    declares its OAuth scopes in `appsscript.json` (code inside a string declares
@@ -230,6 +246,8 @@ sha256, and the state volume is never touched.
 3. *Deploy → New deployment → Web app*, execute as *Me*, access *Anyone*. Google
    Workspace domains may forbid anonymous web apps; a personal Google account does
    not.
+4. `skctl selftest`: scratch spreadsheets in en_US and ru_RU check that the formulas
+   parse and compute in real Google Sheets.
 
 Then:
 
@@ -250,7 +268,8 @@ skctl logs hello
 - One invocation at a time per project; an Apps Script execution stops after six
   minutes.
 - Triggers fire about once a minute with jitter, so schedules have minute
-  resolution at best.
+  resolution at best. A pod that sleeps longer than half an hour is woken by the
+  30-minute trigger, which installs the 1-minute one ahead of time.
 - Consumer accounts: 90 minutes of trigger runtime and 20,000 `UrlFetchApp` calls a
   day.
 - A webhook caller waits for the handler; keep handlers short.
